@@ -1,38 +1,16 @@
 /*
 
-NOTES ----
+TLDR ----
 
-Cache is made of different components:
+HIT/MISS FLOW
+  On iReadEn or iWriteEn: all ways checked in parallel against tag + valid bit.
+  HIT  -> oHit=1, oStall=0, oReadData returned (sign/zero extended via iFunct3)
+  MISS -> oMiss=1, oStall=1, oEvictData/oEvictAddr exposed immediately for Orion.
+         oStall drops the same cycle iFillEn arrives. CPU must re-issue next cycle.
 
-    - Tag Array: A tag is the upper portion of data address. When the CPU asks for data, the cache compares 
-                 the incoming address's tag against every stored tag to check for a match.
-
-    - Valid Bits: A single bit per cache line that determines if it holds real data. 
-                  On power-up or after a reset, all valid bits are 0. A hit requires both a tag match and a valid bit of 1.
-
-    - Dirty Bits: This only matters for a write-back cache policy. If the CPU writes to a cached block, 
-                  instead of immediately writing back to main memory, you just mark that block as "dirty." 
-                  The dirty bit means: this block has been modified and is out of sync with main memory. When that block 
-                  eventually gets evicted, the dirty bit tells the system to write it back before discarding it.
-
-    - Data Array: Actual storage. Indexed by set and way 
-
-
-    Addresses are divided into 3 parts:
-        | Tag | Index | Block Offset |
-        tag: memory
-        index: which cache set to look in
-        block offset: which byte within the cache line
-
-
-    Hit Detection Logic
-        When the CPU requests an address, the cache:
-
-        Extracts the index to find the right set.
-        Simultaneously compares the incoming tag against all N ways in that set.
-        Also checks that the matching way's valid bit is 1.
-        If both conditions are true → HIT, return the data from the matched way.
-        If no way matches (or valid = 0) → MISS, signal the FSM.
+STATE UPDATES (posedge iClk only)
+  Write-on-hit : dataArray updated by iFunct3 (SB/SH/SW), dirty bit set.
+  Block fill   : on iFillEn && miss_pending -> dataArray, tagArray, validBits updated.
 */
 
 module CACHE #(
