@@ -48,27 +48,27 @@ module CACHE #(
     input  wire                           iReadEn,
     input  wire                           iWriteEn,
     input  wire [31:0]                    iWriteData,
-    input  wire [2:0]                     iFunct3,        // byte/half/word select
+    input  wire [2:0]                     iFunct3,  // byte/half/word select
 
     // Fill from memory (on miss return)
     input  wire                           iFillEn,
     input  wire [BLOCK_SIZE*8-1:0]        iFillData,
     input  wire [$clog2(ASSOC)-1:0]        iFillWay,  // which way to fill
 
-    input wire [$clog2(ASSOC)-1:0]         iVictimWay, // which way is being evicted (for writeback)
+    input wire [$clog2(ASSOC)-1:0]         iVictimWay,  // which way is being evicted (for writeback)
 
     // Outputs
     output reg                           oHit,
     output reg                           oMiss,
     output reg [31:0]                    oReadData,
-    output reg                           oDirty,                          // victim is dirty?
-    output reg [BLOCK_SIZE*8-1:0]        oEvictData,          // dirty block data
-    output reg [31:0]                    oEvictAddr,                      // reconstructed address of evicted block
-    output reg [$clog2(ASSOC)-1:0]        oHitWay,            // which way hit
+    output reg                           oDirty,  // victim is dirty?
+    output reg [BLOCK_SIZE*8-1:0]        oEvictData,  // dirty block data
+    output reg [31:0]                    oEvictAddr,  // reconstructed address of evicted block
+    output reg [$clog2(ASSOC)-1:0]        oHitWay,  // which way hit
     // Exposed for replacement policy
-    output reg [ASSOC-1:0]               oValidBits,                 // valid bits for accessed set
-    output reg [ASSOC-1:0]               oDirtyBits,                  // dirty bits for accessed set
-    output reg                           oStall                            // stall CPU on miss until fill completes
+    output reg [ASSOC-1:0]               oValidBits,  // valid bits for accessed set
+    output reg [ASSOC-1:0]               oDirtyBits,  // dirty bits for accessed set
+    output reg                           oStall  // stall CPU on miss until fill completes
 );
 
     // Derived parameters
