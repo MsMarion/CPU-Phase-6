@@ -1,5 +1,4 @@
-
-    /*
+/*
     notes
     i-cache, stores recently fetched instructions so if stage can grab next in cycle
     d-cache, mem stage reads/writes data, holds recently accessed data words 
@@ -33,20 +32,24 @@ module REPLACE_POLICY #(
 ) (
     input  wire        iClk,
     input  wire        iRstN,
-    // Access info from CACHE
+    // access info from cache
     input  wire [$clog2(NUM_SETS)-1:0] iSetIndex,
     input  wire        iAccessValid,   // a real access happened
     input  wire        iHit,
     input  wire [$clog2(ASSOC)-1:0] iHitWay,
     input  wire [ASSOC-1:0] iValidBits,
-    // Victim selection output
+    // victim selection output
     output wire [$clog2(ASSOC)-1:0] oVictimWay,
-    // Prefetch
+    // prefetch
     input  wire [31:0] iAddress,       // current access address
     input  wire        iMiss,          // current access is a miss
     output wire        oPrefetchReq,   // request to prefetch next block
     output wire [31:0] oPrefetchAddr   // address of next sequential block
 );
+
+    // consts for bits
+    localparam WAY_BITS = (ASSOC == 1) ? 1 : $clog2(ASSOC);
+    localparam TREE_BITS = (ASSOC > 1) ? (ASSOC-1) : 1;
 
     // !!! lru
     // assoc=2
@@ -73,18 +76,19 @@ module REPLACE_POLICY #(
 
     // assoc=nway
 
-    reg [$clog2(ASSOC)-1:0] lruAge [0:NUM_SETS-1][0:ASSOC-1];
-    reg [$clog2(ASSOC)-1:0] lruVictimNway;
+    reg [WAY_BITS-1:0] lruAge [0:NUM_SETS-1][0:ASSOC-1];
+    reg [WAY_BITS-1:0] lruVictimNway;
 
     integer y;
     always @(*) begin : selectlru
-        reg [$clog2(ASSOC)-1:0] max = {$clog2(ASSOC){1'b0}};
-        lruVictimNway={$clog2(ASSOC){1'b0}};
+        reg [WAY_BITS-1:0] max;
+        max = {WAY_BITS{1'b0}};
+        lruVictimNway = {WAY_BITS{1'b0}};
         for(y=0; y<ASSOC; y=y+1) begin
             if(iValidBits[y]) begin
                 if(lruAge[iSetIndex][y]>max) begin
                     max = lruAge[iSetIndex][y];
-                    lruVictimNway = y[$clog2(ASSOC)-1:0];
+                    lruVictimNway = y[WAY_BITS-1:0];
 
                 end
 
@@ -99,7 +103,7 @@ module REPLACE_POLICY #(
         if(!iRstN) begin
             for(z=0; z<NUM_SETS; z=z+1) begin
                 for (k = 0; k < ASSOC; k = k + 1) begin
-                    lruAge[z][k] <= k[$clog2(ASSOC)-1:0];
+                    lruAge[z][k] <= k[WAY_BITS-1:0];
                 end
 
             end
@@ -107,10 +111,10 @@ module REPLACE_POLICY #(
             
         end else if(iHit && iAccessValid) begin
             for(e=0; e<ASSOC; e=e+1) begin
-               if(e[$clog2(ASSOC)-1:0]==iHitWay) begin
-                    lruAge[iSetIndex][e]<={$clog2(ASSOC){1'b0}};
+               if(e[WAY_BITS-1:0]==iHitWay) begin
+                    lruAge[iSetIndex][e] <= {WAY_BITS{1'b0}};
 
-               end else if(lruAge[iSetIndex][e] < lruAge[iSetIndex][iHitway]) begin
+               end else if(lruAge[iSetIndex][e] < lruAge[iSetIndex][iHitWay]) begin
                     lruAge[iSetIndex][e]<=lruAge[iSetIndex][e] + 1'b1;
 
                end 
@@ -131,20 +135,17 @@ module REPLACE_POLICY #(
     // {$clog2(ASSOC){1'b0}}
 
     // 0 l 1 r
-    reg [ASSOC-2:0] plruTree [0:NUM_SETS-1];
-    reg [$clog2(ASSOC)-1:0] plruVictimNway;
+    reg [TREE_BITS-1:0] plruTree [0:NUM_SETS-1];
+    reg [WAY_BITS-1:0] plruVictimNway;
 
-    always @(*) begin : selectplru 
-
-       
-        reg [$clog2(ASSOC)-1:0] node;
-        node = {$clog2(ASSOC){1'b0}};
-        reg [$clog2(ASSOC)-1:0] wayIndex;
-        wayIndex = {$clog2(ASSOC){1'b0}};
-
+    always @(*) begin : selectplru
+        reg [WAY_BITS-1:0] node;
+        reg [WAY_BITS-1:0] wayIndex;
         integer l;
         integer nL;
-        nL=$clog2(ASSOC);
+        node = {WAY_BITS{1'b0}};
+        wayIndex = {WAY_BITS{1'b0}};
+        nL = WAY_BITS;
 
         for(l=0; l<nL; l=l+1) begin
            if(plruTree[iSetIndex][node]) begin
@@ -168,31 +169,33 @@ module REPLACE_POLICY #(
 
     // set the nodes we visited
     integer g;
-    if(!iRstN) begin
-        for(g=0; g<NUM_SETS; g=g+1) begin
-            plruTree[g]<={(ASSOC-1){1'b0}};
+    integer lp;
+    always @(posedge iClk or negedge iRstN) begin
+        if(!iRstN) begin
+            for(g=0; g<NUM_SETS; g=g+1) begin
+                plruTree[g] <= {TREE_BITS{1'b0}};
 
-        end
+            end
 
-    end else if(iHit && iAccessValid) begin
+        end else if(iHit && iAccessValid) begin
        
-        begin : plruUpdate
-            reg [$clog2(ASSOC)-1:0] node;
-            integer l;
-            integer nL;
-            node       = {$clog2(ASSOC){1'b0}};
-            nL = $clog2(ASSOC);
-            for (l = 0; l < nL; l = l + 1) begin
-                if (iHitWay[nL-1-l]) begin
-                    plruTree[iSetIndex][node] <= 1'b0; // go away
-                    node = 2*node + 2; // right
-                end else begin
-                    plru_tree[iSetIndex][node] <= 1'b1; // go away
-                    node = 2*node + 1; // left
+            begin : plruUpdate
+                reg [WAY_BITS-1:0] node;
+                integer nL;
+                node = {WAY_BITS{1'b0}};
+                nL = WAY_BITS;
+                for (lp = 0; lp < nL; lp = lp + 1) begin
+                    if (iHitWay[nL-1-lp]) begin
+                        plruTree[iSetIndex][node] <= 1'b0; // go away
+                        node = 2*node + 2; // right
+                    end else begin
+                        plruTree[iSetIndex][node] <= 1'b1; // go away
+                        node = 2*node + 1; // left
+                    end
                 end
             end
-        end
 
+        end
     end
 
 
@@ -201,27 +204,28 @@ module REPLACE_POLICY #(
     // check if empty way, if so, go that route lol
 
     // invalid scan
-    reg [$clog2(ASSOC)-1:0] invalidWayIndex;
-    reg isInvalid = 1'b0;
+    reg [WAY_BITS-1:0] invalidWayIndex;
+    reg isInvalid;
     integer i;
 
     always @(*) begin
-        invalidWayIndex = {$clog2(ASSOC){1'b0}};
+        isInvalid = 1'b0;
+        invalidWayIndex = {WAY_BITS{1'b0}};
         for (i = 0; i < ASSOC; i = i + 1) begin
             if (!iValidBits[i] && !isInvalid) begin
                 isInvalid = 1'b1;
-                invalidWayIndex = i[$clog2(ASSOC)-1:0];
+                invalidWayIndex = i[WAY_BITS-1:0];
             end
         end
     end
 
     // selecting victim
-    reg [$clog2(ASSOC)-1:0] oVictimWayTemp;
+    reg [WAY_BITS-1:0] oVictimWayTemp;
     always @(*) begin
-        if(ASSOC=1) begin
-            oVictimWayTemp={$clog2(ASSOC){1'b0}};
+        if(ASSOC==1) begin
+            oVictimWayTemp = {WAY_BITS{1'b0}};
             
-        end else if(ASSOC=2) begin
+        end else if(ASSOC==2) begin
             oVictimWayTemp=IS_LRU ? lruVictim2way : plruVictim2way;
 
         end else begin 
@@ -230,7 +234,7 @@ module REPLACE_POLICY #(
         end
        
         if(isInvalid) begin
-            oVictimWay=invalidWayIndex;
+            oVictimWayTemp=invalidWayIndex;
         end
 
     end 
