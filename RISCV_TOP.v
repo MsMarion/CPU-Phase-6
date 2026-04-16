@@ -10,21 +10,39 @@ module RISCV_TOP (
   // ==========================================================================
   // 1. IF Stage (Instruction Fetch)
   // ==========================================================================
-  wire [31:0] wActualNextPC, wIF_PC, wIF_Instr;
-  reg  [31:0] rPC;
-  wire wPCWrite, wIFIDWrite;
+  // --- Instruction Cache ---
+  wire wICacheHit, wICacheMiss;
+  wire [31:0] wICacheReadData;
+  wire wIMemReady, wIMemValid, wIMemRd, wIMemWr;
+  wire [31:0] wIMemRdAddr, wIMemWrAddr;
+  wire [511:0] wIMemData, wIMemRdData, wIMemWrData;
 
-  always @(posedge iClk or negedge iRstN) begin
-    if (~iRstN) rPC <= 32'h0;
-    else if (wPCWrite) rPC <= wActualNextPC;
-  end
-
-  assign wIF_PC = rPC;
-
-  INSTRUCTION_MEMORY instr_mem (
-    .iRdAddr(wIF_PC),
-    .oInstr(wIF_Instr)
+  CACHE #(
+    .EVICT_POLICY(0), 
+    .WAYS(4), 
+    .CACHE_SIZE(32), 
+    .BLOCK_SIZE(64)
+  ) icache (
+    .i_clk(iClk), .i_rstn(iRstN),
+    .i_read(1'b1),
+    .i_write(1'b0),
+    .i_funct(2'b10), // LW
+    .i_addr(wIF_PC),
+    .i_cpu_data(32'b0),
+    .i_mem_ready(wIMemReady),
+    .i_mem_valid(wIMemValid),
+    .i_mem_data(wIMemData),
+    .o_hit(wICacheHit), .o_miss(wICacheMiss),
+    .o_cpu_data(wICacheReadData),
+    .o_mem_rd(wIMemRd),
+    .o_mem_wr(wIMemWr),
+    .o_mem_rd_addr(wIMemRdAddr),
+    .o_mem_wr_addr(wIMemWrAddr),
+    .o_mem_rd_data(wIMemRdData),
+    .o_mem_wr_data(wIMemWrData)
   );
+
+  assign wIF_Instr = wICacheHit ? wICacheReadData : 32'h00000013;
 
   // ==========================================================================
   // Pipeline Register: IF/ID
@@ -35,7 +53,7 @@ module RISCV_TOP (
   IF_ID reg_if_id (
     .clk(iClk),
     .rst(~iRstN),
-    .stall(~wIFIDWrite),
+    .stall(~wIFIDWrite || wCacheStall), // NEW: gated by cache stall
     .flush(wBranchTaken),
     .i_PC(wIF_PC),
     .i_instruction(wIF_Instr),
@@ -133,7 +151,7 @@ module RISCV_TOP (
   ID_EX reg_id_ex (
     .clk(iClk),
     .rst(~iRstN),
-    .stall(1'b0),
+    .stall(wCacheStall), // NEW: gated by cache stall
     .flush(wIDEXFlush || wBranchTaken),
     .iPcSrc(wID_PcSrc),
     .iMemRead(wID_MemRd),
@@ -287,6 +305,7 @@ module RISCV_TOP (
   EX_MEM reg_ex_mem (
     .clk(iClk),
     .rst(~iRstN),
+    .stall(wCacheStall), // NEW: gated by cache stall
     .i_rs2_ptr(wEX_Rs2),
     .iMemRead(wEX_MemRd),
     .iMemWrite(wEX_MemWr),
@@ -332,15 +351,36 @@ module RISCV_TOP (
   wire [31:0] wMEM_ReadData;
   wire [31:0] wActualMemWriteData;
   assign wActualMemWriteData = (wForwardMem) ? wWB_FinalWriteData : wMEM_Rs2Data;
-  MEM_STAGE mem_stage (
-    .iClk(iClk),
-    .iRstN(iRstN),
-    .iAddress(wMEM_AluResult),
-    .iWriteData(wActualMemWriteData),
-    .iFunct3(wMEM_Funct3),
-    .iMemWrite(wMEM_MemWr),
-    .iMemRead(wMEM_MemRd),
-    .oReadData(wMEM_ReadData)
+  // --- Data Cache ---
+  wire wDCacheHit, wDCacheMiss;
+  wire [31:0] wDCacheReadData;
+  wire wDMemReady, wDMemValid, wDMemRd, wDMemWr;
+  wire [31:0] wDMemRdAddr, wDMemWrAddr;
+  wire [511:0] wDMemData, wDMemRdData, wDMemWrData;
+
+  CACHE #(
+    .EVICT_POLICY(0), 
+    .WAYS(4), 
+    .CACHE_SIZE(32), 
+    .BLOCK_SIZE(64)
+  ) dcache (
+    .i_clk(iClk), .i_rstn(iRstN),
+    .i_read(wMEM_MemRd),
+    .i_write(wMEM_MemWr),
+    .i_funct(wMEM_Funct3[1:0]),
+    .i_addr(wMEM_AluResult),
+    .i_cpu_data(wActualMemWriteData),
+    .i_mem_ready(wDMemReady),
+    .i_mem_valid(wDMemValid),
+    .i_mem_data(wDMemData),
+    .o_hit(wDCacheHit), .o_miss(wDCacheMiss),
+    .o_cpu_data(wMEM_ReadData),
+    .o_mem_rd(wDMemRd),
+    .o_mem_wr(wDMemWr),
+    .o_mem_rd_addr(wDMemRdAddr),
+    .o_mem_wr_addr(wDMemWrAddr),
+    .o_mem_rd_data(wDMemRdData),
+    .o_mem_wr_data(wDMemWrData)
   );
 
 
@@ -353,6 +393,7 @@ module RISCV_TOP (
   MEM_WB reg_mem_wb (
     .clk(iClk),
     .rst(~iRstN),
+    .stall(wCacheStall), // NEW: gated by cache stall
     .iMemToReg(wMEM_MemtoReg),
     .iRegWrite(wMEM_RegWrite),
     .iJump(wMEM_Jump),
@@ -403,6 +444,34 @@ module RISCV_TOP (
     .iData1(wWB_PcPlus4),
     .iSel(wWB_Jump),
     .oData(wWB_FinalWriteData)
+  );
+
+  // --- Miss Handler ---
+  wire wCacheStall;
+  MISS_HANDLER #(.BLOCK_SIZE(64)) miss_handler (
+    .iClk(iClk), .iRstN(iRstN),
+    // I-Cache
+    .oIMemReady(wIMemReady),
+    .oIMemValid(wIMemValid),
+    .oIMemData(wIMemData),
+    .iIMemRd(wIMemRd),
+    .iIMemWr(wIMemWr),
+    .iIMemRdAddr(wIMemRdAddr),
+    .iIMemWrAddr(wIMemWrAddr),
+    .iIMemRdData(wIMemRdData),
+    .iIMemWrData(wIMemWrData),
+    // D-Cache
+    .oDMemReady(wDMemReady),
+    .oDMemValid(wDMemValid),
+    .oDMemData(wDMemData),
+    .iDMemRd(wDMemRd),
+    .iDMemWr(wDMemWr),
+    .iDMemRdAddr(wDMemRdAddr),
+    .iDMemWrAddr(wDMemWrAddr),
+    .iDMemRdData(wDMemRdData),
+    .iDMemWrData(wDMemWrData),
+    // Global Stall
+    .oStall(wCacheStall)
   );
 
 endmodule

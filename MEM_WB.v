@@ -1,6 +1,7 @@
 module MEM_WB(
     input  wire        clk,
     input  wire        rst,
+    input  wire        stall,   // NEW: stall from miss handler
 
     // Control signals from MEM
     input  wire        iMemToReg,
@@ -47,7 +48,7 @@ always @(posedge clk) begin
         oFinish      <= 1'b0;
         oMemRead     <= 1'b0;
     end
-    else begin
+    else if (!stall) begin
         oMemToReg    <= iMemToReg;
         oRegWrite    <= iRegWrite;
         oJump        <= iJump;

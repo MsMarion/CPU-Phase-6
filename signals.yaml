@@ -8,6 +8,6 @@
 
 IF_ID_Instruction: ("wInstr") 
 IF_ID_PC: ("wPc") 
-Data_Memory: ("mem_stage", "data_memory", "rDataMem") 
+Data_Memory: ("miss_handler", "main_memory") 
 trace: [if_stage, id_stage, ex_stage, mem_stage, wb_stage, hd, fwd]
 

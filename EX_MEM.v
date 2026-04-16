@@ -1,6 +1,7 @@
 module EX_MEM(
     input  wire        clk,
     input  wire        rst,
+    input  wire        stall,   // NEW: stall from miss handler
 
     // Control signals from EX
     input  wire        iMemRead,
@@ -66,7 +67,7 @@ always @(posedge clk) begin
         oBranch     <= 1'b0;
         oFinish      <= 1'b0;
     end
-    else begin
+    else if (!stall) begin
         oMemRead     <= iMemRead;
         oMemWrite    <= iMemWrite;
         oMemToReg    <= iMemToReg;
