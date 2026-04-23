@@ -5,6 +5,8 @@
     - Integrated replacement policy.
 */
 
+`timescale 1ns/1ps
+
 module CACHE #(
     parameter EVICT_POLICY = 0, // 0 = LRU, 1 = PLRU
     parameter WAYS         = 4,
@@ -94,7 +96,9 @@ module CACHE #(
         .iHit(hit),
         .iHitWay(hit_way),
         .iValidBits(8'b0), // Need to pack valid bits correctly for n-way
-        .oVictimWay(victim_way)
+        .oVictimWay(victim_way),
+        .iAddress(i_addr),
+        .iMiss(o_miss)
         // prefetch signals left unconnected for now
     );
 
@@ -171,12 +175,17 @@ module CACHE #(
                         o_hit = 1'b1;
                     end else begin
                         o_miss = 1'b1;
-                        if (dirtyBits[current_idx][victim_way] && validBits[current_idx][victim_way])
+                        if (dirtyBits[current_idx][victim_way] && validBits[current_idx][victim_way]) begin
                             next_state = WB_READY;
-                        else
+                            o_mem_wr = 1'b1; 
+                            o_mem_wr_addr = {tagArray[current_idx][victim_way], current_idx, {OFF_BITS{1'b0}}};
+                        end else begin
                             next_state = MISS_READY;
+                            o_mem_rd = 1'b1; 
+                            o_mem_rd_addr = {current_tag, current_idx, {OFF_BITS{1'b0}}};
                     end
                 end
+            end
             end
 
             WB_READY: begin
@@ -184,24 +193,37 @@ module CACHE #(
                 o_mem_wr = 1'b1;
                 o_mem_wr_addr = {tagArray[current_idx][victim_way], current_idx, {OFF_BITS{1'b0}}};
                 o_mem_wr_data = dataArray[current_idx][victim_way];
-                if (i_mem_ready) next_state = WB_VALID;
+                if (i_mem_ready) begin 
+                    next_state = WB_VALID;
+                end
             end
 
             WB_VALID: begin
                 o_miss = 1'b1;
-                if (i_mem_valid) next_state = MISS_READY;
+                if (i_mem_valid) begin 
+                    next_state = MISS_READY;
+                end
             end
 
             MISS_READY: begin
                 o_miss = 1'b1;
                 o_mem_rd = 1'b1;
                 o_mem_rd_addr = {current_tag, current_idx, {OFF_BITS{1'b0}}};
-                if (i_mem_ready) next_state = MISS_VALID;
+                if (i_mem_ready) begin
+                    next_state = MISS_VALID;
+                end
             end
 
             MISS_VALID: begin
                 o_miss = 1'b1;
-                if (i_mem_valid) next_state = IDLE; // Return to IDLE to re-check hit (will be a hit now)
+                if (i_mem_valid) begin
+                    case (i_funct)
+                        2'b00: o_cpu_data = {{24{dataArray[current_idx][hit_way][current_off*8+7]}}, dataArray[current_idx][hit_way][current_off*8 +: 8]};
+                        2'b01: o_cpu_data = {{16{dataArray[current_idx][hit_way][current_off*8+15]}}, dataArray[current_idx][hit_way][current_off*8 +: 16]};
+                        2'b10: o_cpu_data = dataArray[current_idx][hit_way][current_off*8 +: 32];
+                    endcase
+                    next_state = IDLE; // Return to IDLE to re-check hit (will be a hit now)
+                end
             end
         endcase
     end
