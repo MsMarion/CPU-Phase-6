@@ -1,13 +1,13 @@
 /*
     Updated CACHE.v to match Phase 6 Handshake Specification.
-    - Parameterized EVICT_POLICY, WAYS, CACHE_SIZE (KB), BLOCK_SIZE (B).
+    - Parameterized EVICT_POLICY, NUM_WAYS, CACHE_SIZE (KB), BLOCK_SIZE (B).
     - Handshake logic for memory interface (i_mem_ready, i_mem_valid).
     - Integrated replacement policy.
 */
 
 module CACHE #(
     parameter EVICT_POLICY = 0, // 0 = LRU, 1 = PLRU
-    parameter WAYS         = 4,
+    parameter NUM_WAYS     = 4,
     parameter CACHE_SIZE   = 32, // KB
     parameter BLOCK_SIZE   = 64  // B
 ) (
@@ -22,7 +22,7 @@ module CACHE #(
     // MEM interface inputs
     input  i_mem_ready,         // Memory is ready for a request
     input  i_mem_valid,         // Memory data is valid (returning from read)
-    input  [BLOCK_SIZE*8-1:0] i_mem_data,
+    input  [BLOCK_SIZE*8-1:0] i_mem_rd_data,
     // CPU interface outputs
     output reg o_hit,
     output reg o_miss,
@@ -38,16 +38,16 @@ module CACHE #(
 
     // Derived parameters
     localparam TOTAL_SIZE_BYTES = CACHE_SIZE * 1024;
-    localparam NUM_SETS         = TOTAL_SIZE_BYTES / (BLOCK_SIZE * WAYS);
+    localparam NUM_SETS         = TOTAL_SIZE_BYTES / (BLOCK_SIZE * NUM_WAYS);
     localparam OFF_BITS         = $clog2(BLOCK_SIZE);
     localparam IDX_BITS         = $clog2(NUM_SETS);
     localparam TAG_BITS         = 32 - IDX_BITS - OFF_BITS;
 
     // Internal Storage
-    reg [TAG_BITS-1:0]        tagArray   [NUM_SETS-1:0][WAYS-1:0];
-    reg                       validBits  [NUM_SETS-1:0][WAYS-1:0];
-    reg                       dirtyBits  [NUM_SETS-1:0][WAYS-1:0];
-    reg [BLOCK_SIZE*8-1:0]    dataArray  [NUM_SETS-1:0][WAYS-1:0];
+    reg [TAG_BITS-1:0]        tagArray   [NUM_SETS-1:0][NUM_WAYS-1:0];
+    reg                       validBits  [NUM_SETS-1:0][NUM_WAYS-1:0];
+    reg                       dirtyBits  [NUM_SETS-1:0][NUM_WAYS-1:0];
+    reg [BLOCK_SIZE*8-1:0]    dataArray  [NUM_SETS-1:0][NUM_WAYS-1:0];
 
     // FSM States
     localparam IDLE       = 3'd0;
@@ -66,23 +66,34 @@ module CACHE #(
 
     // Hit detection
     reg hit;
-    reg [$clog2(WAYS)-1:0] hit_way;
+    reg [$clog2(NUM_WAYS)-1:0] hit_way;
     integer w;
     always @(*) begin
         hit = 1'b0;
         hit_way = 0;
-        for (w = 0; w < WAYS; w = w + 1) begin
+        for (w = 0; w < NUM_WAYS; w = w + 1) begin
             if (validBits[current_idx][w] && (tagArray[current_idx][w] == current_tag)) begin
                 hit = 1'b1;
-                hit_way = w[$clog2(WAYS)-1:0];
+                hit_way = w[$clog2(NUM_WAYS)-1:0];
             end
         end
     end
 
+    // Pack valid bits for replacement policy input
+    reg [NUM_WAYS-1:0] packed_valid;
+    integer v;
+    always @(*) begin
+        for (v = 0; v < NUM_WAYS; v = v + 1) packed_valid[v] = validBits[current_idx][v];
+    end
+
+    // Prefetch output wires
+    wire        prefetch_req;
+    wire [31:0] prefetch_addr;
+
     // Replacement Policy instantiation
-    wire [$clog2(WAYS)-1:0] victim_way;
+    wire [$clog2(NUM_WAYS)-1:0] victim_way;
     REPLACE_POLICY #(
-        .ASSOC(WAYS),
+        .ASSOC(NUM_WAYS),
         .NUM_SETS(NUM_SETS),
         .BLOCK_SIZE(BLOCK_SIZE),
         .IS_LRU(EVICT_POLICY == 0)
@@ -93,17 +104,13 @@ module CACHE #(
         .iAccessValid(i_read || i_write),
         .iHit(hit),
         .iHitWay(hit_way),
-        .iValidBits(8'b0), // Need to pack valid bits correctly for n-way
-        .oVictimWay(victim_way)
-        // prefetch signals left unconnected for now
+        .iValidBits(packed_valid),
+        .oVictimWay(victim_way),
+        .iAddress(i_addr),
+        .iMiss(o_miss),
+        .oPrefetchReq(prefetch_req),
+        .oPrefetchAddr(prefetch_addr)
     );
-
-    // Pack valid bits for replacement policy input
-    reg [WAYS-1:0] packed_valid;
-    integer v;
-    always @(*) begin
-        for (v = 0; v < WAYS; v = v + 1) packed_valid[v] = validBits[current_idx][v];
-    end
 
     // FSM logic
     always @(posedge i_clk or negedge i_rstn) begin
@@ -111,7 +118,7 @@ module CACHE #(
             state <= IDLE;
             // Reset arrays (simulation only usually, but good practice)
             for (integer i=0; i<NUM_SETS; i++) begin
-                for (integer j=0; j<WAYS; j++) begin
+                for (integer j=0; j<NUM_WAYS; j++) begin
                     validBits[i][j] <= 1'b0;
                     dirtyBits[i][j] <= 1'b0;
                 end
@@ -129,6 +136,7 @@ module CACHE #(
                                     2'b00: dataArray[current_idx][hit_way][current_off*8 +: 8]  <= i_cpu_data[7:0];
                                     2'b01: dataArray[current_idx][hit_way][current_off*8 +: 16] <= i_cpu_data[15:0];
                                     2'b10: dataArray[current_idx][hit_way][current_off*8 +: 32] <= i_cpu_data;
+                                    default: ; // no-op
                                 endcase
                                 dirtyBits[current_idx][hit_way] <= 1'b1;
                             end
@@ -139,7 +147,7 @@ module CACHE #(
                 MISS_VALID: begin
                     if (i_mem_valid) begin
                         // Fill line
-                        dataArray[current_idx][victim_way] <= i_mem_data;
+                        dataArray[current_idx][victim_way] <= i_mem_rd_data;
                         tagArray[current_idx][victim_way]  <= current_tag;
                         validBits[current_idx][victim_way] <= 1'b1;
                         dirtyBits[current_idx][victim_way] <= 1'b0;
@@ -152,6 +160,7 @@ module CACHE #(
                         // Handled in next_state logic
                     end
                 end
+                default: ; // no-op
             endcase
         end
     end
@@ -203,6 +212,7 @@ module CACHE #(
                 o_miss = 1'b1;
                 if (i_mem_valid) next_state = IDLE; // Return to IDLE to re-check hit (will be a hit now)
             end
+            default: ; // no-op
         endcase
     end
 
@@ -214,6 +224,7 @@ module CACHE #(
                 2'b00: o_cpu_data = {{24{dataArray[current_idx][hit_way][current_off*8+7]}}, dataArray[current_idx][hit_way][current_off*8 +: 8]};
                 2'b01: o_cpu_data = {{16{dataArray[current_idx][hit_way][current_off*8+15]}}, dataArray[current_idx][hit_way][current_off*8 +: 16]};
                 2'b10: o_cpu_data = dataArray[current_idx][hit_way][current_off*8 +: 32];
+                default: o_cpu_data = 32'b0;
             endcase
         end
     end

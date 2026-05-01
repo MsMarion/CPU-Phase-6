@@ -48,16 +48,16 @@ module REPLACE_POLICY #(
 );
 
     // consts for bits
-    localparam WAY_BITS = (ASSOC == 1) ? 1 : $clog2(ASSOC);
+    localparam WAY_BITS  = (ASSOC == 1) ? 1 : $clog2(ASSOC);
     localparam TREE_BITS = (ASSOC > 1) ? (ASSOC-1) : 1;
 
-    // !!! lru
-    // assoc=2
-    reg lruBit [0:NUM_SETS-1];
-    wire lruVictim2way  = ~lruBit[iSetIndex];
-
+    // !!! lru 2-way
+    reg lruBit  [0:NUM_SETS-1];
     reg plruBit [0:NUM_SETS-1];
-    wire plruVictim2way  = plruBit[iSetIndex];
+
+    // zero-extend to WAY_BITS to avoid warnings
+    wire [WAY_BITS-1:0] lruVictim2way  = {{(WAY_BITS-1){1'b0}}, ~lruBit[iSetIndex]};
+    wire [WAY_BITS-1:0] plruVictim2way = {{(WAY_BITS-1){1'b0}},  plruBit[iSetIndex]};
 
     integer x;
     always @(posedge iClk or negedge iRstN) begin
@@ -67,15 +67,13 @@ module REPLACE_POLICY #(
                 plruBit[x] <= 1'b0;
             end
         end else if (iAccessValid && iHit) begin
-            lruBit[iSetIndex]  <= iHitWay[0]; // record last used way
-            plruBit[iSetIndex] <= ~iHitWay[0]; // point away from used way (invert to opp lol)
+            lruBit[iSetIndex]  <= iHitWay[0];
+            plruBit[iSetIndex] <= ~iHitWay[0];
         end
-
     end
 
 
-    // assoc=nway
-
+    // !!! lru n-way
     reg [WAY_BITS-1:0] lruAge [0:NUM_SETS-1][0:ASSOC-1];
     reg [WAY_BITS-1:0] lruVictimNway;
 
@@ -84,171 +82,133 @@ module REPLACE_POLICY #(
         reg [WAY_BITS-1:0] max;
         max = {WAY_BITS{1'b0}};
         lruVictimNway = {WAY_BITS{1'b0}};
-        for(y=0; y<ASSOC; y=y+1) begin
-            if(iValidBits[y]) begin
-                if(lruAge[iSetIndex][y]>max) begin
+        for (y = 0; y < ASSOC; y = y + 1) begin
+            if (iValidBits[y]) begin
+                if (lruAge[iSetIndex][y] > max) begin
                     max = lruAge[iSetIndex][y];
                     lruVictimNway = y[WAY_BITS-1:0];
-
                 end
-
             end
-        end 
+        end
     end
 
     integer z;
     integer k;
     integer e;
     always @(posedge iClk or negedge iRstN) begin
-        if(!iRstN) begin
-            for(z=0; z<NUM_SETS; z=z+1) begin
-                for (k = 0; k < ASSOC; k = k + 1) begin
+        if (!iRstN) begin
+            for (z = 0; z < NUM_SETS; z = z + 1)
+                for (k = 0; k < ASSOC; k = k + 1)
                     lruAge[z][k] <= k[WAY_BITS-1:0];
-                end
-
-            end
-
-            
-        end else if(iHit && iAccessValid) begin
-            for(e=0; e<ASSOC; e=e+1) begin
-               if(e[WAY_BITS-1:0]==iHitWay) begin
+        end else if (iHit && iAccessValid) begin
+            for (e = 0; e < ASSOC; e = e + 1) begin
+                if (e[WAY_BITS-1:0] == iHitWay)
                     lruAge[iSetIndex][e] <= {WAY_BITS{1'b0}};
-
-               end else if(lruAge[iSetIndex][e] < lruAge[iSetIndex][iHitWay]) begin
-                    lruAge[iSetIndex][e]<=lruAge[iSetIndex][e] + 1'b1;
-
-               end 
-
-
+                else if (lruAge[iSetIndex][e] < lruAge[iSetIndex][iHitWay])
+                    lruAge[iSetIndex][e] <= lruAge[iSetIndex][e] + 1'b1;
             end
-
-
         end
-
-
-
     end
 
 
-    // plru
-    // [$clog2(ASSOC)-1:0]
-    // {$clog2(ASSOC){1'b0}}
-
-    // 0 l 1 r
-    reg [TREE_BITS-1:0] plruTree [0:NUM_SETS-1];
-    reg [WAY_BITS-1:0] plruVictimNway;
+    // !!! plru n-way (tree)
+    reg [TREE_BITS-1:0] plruTree     [0:NUM_SETS-1];
+    reg [WAY_BITS-1:0]  plruVictimNway;
 
     always @(*) begin : selectplru
         reg [WAY_BITS-1:0] node;
         reg [WAY_BITS-1:0] wayIndex;
         integer l;
         integer nL;
-        node = {WAY_BITS{1'b0}};
+        node     = {WAY_BITS{1'b0}};
         wayIndex = {WAY_BITS{1'b0}};
         nL = WAY_BITS;
-
-        for(l=0; l<nL; l=l+1) begin
-           if(plruTree[iSetIndex][node]) begin
-                // right
-                wayIndex[nL-1-l]=1'b1;
-                node=2*node+2;
-                
-
-           end else begin
-                wayIndex[nL-1-l]=1'b0;
-                node=2*node+1;
-
-           end
-
+        for (l = 0; l < nL; l = l + 1) begin
+            if (plruTree[iSetIndex][node]) begin
+                wayIndex[nL-1-l] = 1'b1;
+                node = 2*node + 2;
+            end else begin
+                wayIndex[nL-1-l] = 1'b0;
+                node = 2*node + 1;
+            end
         end
-
-        plruVictimNway=wayIndex;
-        
-
+        plruVictimNway = wayIndex;
     end
 
-    // set the nodes we visited
-    integer g;
+    // allow non-blocking assignments to array[variable_index] inside loops).
+    //we pre-compute which node each tree level touches combinatorially,
+    // then do a single non-blocking write per level using those fixed indices.
+    reg [WAY_BITS-1:0] plruNode [0:WAY_BITS-1]; // node index at each level
+    reg                plruDir  [0:WAY_BITS-1]; // direction bit to write at each level
+
+    integer cp;
+    always @(*) begin : plruPrecompute
+        reg [WAY_BITS-1:0] n;
+        n = {WAY_BITS{1'b0}};
+        for (cp = 0; cp < WAY_BITS; cp = cp + 1) begin
+            plruNode[cp] = n;
+            if (iHitWay[WAY_BITS-1-cp]) begin
+                plruDir[cp] = 1'b0; // point away from right -> left
+                n = 2*n + 2;
+            end else begin
+                plruDir[cp] = 1'b1; // point away from left -> right
+                n = 2*n + 1;
+            end
+        end
+    end
+
+    integer gp;
     integer lp;
     always @(posedge iClk or negedge iRstN) begin
-        if(!iRstN) begin
-            for(g=0; g<NUM_SETS; g=g+1) begin
-                plruTree[g] <= {TREE_BITS{1'b0}};
-
-            end
-
-        end else if(iHit && iAccessValid) begin
-       
-            begin : plruUpdate
-                reg [WAY_BITS-1:0] node;
-                integer nL;
-                node = {WAY_BITS{1'b0}};
-                nL = WAY_BITS;
-                for (lp = 0; lp < nL; lp = lp + 1) begin
-                    if (iHitWay[nL-1-lp]) begin
-                        plruTree[iSetIndex][node] <= 1'b0; // go away
-                        node = 2*node + 2; // right
-                    end else begin
-                        plruTree[iSetIndex][node] <= 1'b1; // go away
-                        node = 2*node + 1; // left
-                    end
-                end
-            end
-
+        if (!iRstN) begin
+            for (gp = 0; gp < NUM_SETS; gp = gp + 1)
+                plruTree[gp] <= {TREE_BITS{1'b0}};
+        end else if (iHit && iAccessValid) begin
+            // each level writes to a statically-known index within the set
+            // (plruNode[lp] is combinatorial, not a loop-carried variable here)
+            for (lp = 0; lp < WAY_BITS; lp = lp + 1)
+                plruTree[iSetIndex][plruNode[lp]] <= plruDir[lp];
         end
     end
 
 
-    // !!! selecting victim
-    // either plru or lru depending on parameter
-    // check if empty way, if so, go that route lol
-
-    // invalid scan
+    // !!! invalid way scan — prefer empty slot over evicting live line
     reg [WAY_BITS-1:0] invalidWayIndex;
-    reg isInvalid;
+    reg                isInvalid;
     integer i;
 
     always @(*) begin
-        isInvalid = 1'b0;
+        isInvalid      = 1'b0;
         invalidWayIndex = {WAY_BITS{1'b0}};
         for (i = 0; i < ASSOC; i = i + 1) begin
             if (!iValidBits[i] && !isInvalid) begin
-                isInvalid = 1'b1;
+                isInvalid       = 1'b1;
                 invalidWayIndex = i[WAY_BITS-1:0];
             end
         end
     end
 
-    // selecting victim
+    // !!! victim selection
     reg [WAY_BITS-1:0] oVictimWayTemp;
     always @(*) begin
-        if(ASSOC==1) begin
+        if (ASSOC == 1)
             oVictimWayTemp = {WAY_BITS{1'b0}};
-            
-        end else if(ASSOC==2) begin
-            oVictimWayTemp=IS_LRU ? lruVictim2way : plruVictim2way;
+        else if (ASSOC == 2)
+            oVictimWayTemp = IS_LRU ? lruVictim2way : plruVictim2way;
+        else
+            oVictimWayTemp = IS_LRU ? lruVictimNway : plruVictimNway;
 
-        end else begin 
-            oVictimWayTemp=IS_LRU ? lruVictimNway : plruVictimNway;
-        
-        end
-       
-        if(isInvalid) begin
-            oVictimWayTemp=invalidWayIndex;
-        end
+        if (isInvalid)
+            oVictimWayTemp = invalidWayIndex;
+    end
 
-    end 
+    assign oVictimWay = oVictimWayTemp;
 
-    assign oVictimWay = oVictimWayTemp; 
+    // !!! prefetch — fire on miss
+    wire [31:0] base = iAddress & ~(32'd0 + BLOCK_SIZE - 1);
+    wire [31:0] next = base + BLOCK_SIZE;
 
-    // !!! prefetch
-    // so we only fire on miss lol
-    wire [31:0] base  = iAddress & ~(32'd0 + BLOCK_SIZE - 1);
-    wire [31:0] next  = base + BLOCK_SIZE;
-
-    assign oPrefetchReq  = iAccessValid & iMiss; // if miss and valid, we gotta a prefetch houston
+    assign oPrefetchReq  = iAccessValid & iMiss;
     assign oPrefetchAddr = next;
-
-
 
 endmodule
