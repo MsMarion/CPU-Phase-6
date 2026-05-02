@@ -19,8 +19,7 @@ module MISS_HANDLER #(
     input  wire iIMemWr,
     input  wire [31:0] iIMemRdAddr,
     input  wire [31:0] iIMemWrAddr,
-    input  wire [BLOCK_SIZE*8-1:0] iIMemRdData, // usually zero
-    input  wire [BLOCK_SIZE*8-1:0] iIMemWrData, // usually zero
+    input  wire [BLOCK_SIZE*8-1:0] iIMemWrData, // write-back data
 
     // D-Cache interface
     output reg  oDMemReady,
@@ -30,7 +29,6 @@ module MISS_HANDLER #(
     input  wire iDMemWr,
     input  wire [31:0] iDMemRdAddr,
     input  wire [31:0] iDMemWrAddr,
-    input  wire [BLOCK_SIZE*8-1:0] iDMemRdData,
     input  wire [BLOCK_SIZE*8-1:0] iDMemWrData,
 
     // Pipeline control
@@ -101,9 +99,10 @@ module MISS_HANDLER #(
             end
 
             SERVING_D: begin
-                memRead      = iDMemRd;
-                memWrite     = iDMemWr;
-                memAddr      = iDMemRd ? iDMemRdAddr : iDMemWrAddr;
+                oDMemReady = 1'b1;  // Keep ready high while servicing
+                memRead    = iDMemRd;
+                memWrite   = iDMemWr;
+                memAddr    = iDMemRd ? iDMemRdAddr : iDMemWrAddr;
                 memWriteData = iDMemWrData;
                 
                 if (memReady) begin
@@ -113,9 +112,10 @@ module MISS_HANDLER #(
             end
 
             SERVING_I: begin
-                memRead      = iIMemRd;
-                memWrite     = iIMemWr;
-                memAddr      = iIMemRd ? iIMemRdAddr : iIMemWrAddr;
+                oIMemReady = 1'b1;  // Keep ready high while servicing
+                memRead    = iIMemRd;
+                memWrite   = iIMemWr;
+                memAddr    = iIMemRd ? iIMemRdAddr : iIMemWrAddr;
                 memWriteData = iIMemWrData;
 
                 if (memReady) begin
