@@ -44,7 +44,21 @@ module REPLACE_POLICY #(
     input  wire [31:0] iAddress,       // current access address
     input  wire        iMiss,          // current access is a miss
     output wire        oPrefetchReq,   // request to prefetch next block
-    output wire [31:0] oPrefetchAddr   // address of next sequential block
+    output wire [31:0] oPrefetchAddr,  // address of next sequential block
+    // prefetch victim query (combinational, separate from demand victim)
+    input  wire [$clog2(NUM_SETS)-1:0] iPfSetIndex,
+    input  wire [ASSOC-1:0]            iPfValidBits,
+    output wire [$clog2(ASSOC)-1:0]    oPfVictimWay,
+    // prefetch fill: mark the filled way as LRU so future evictions match update_mru
+    input  wire                           iPfFill,
+    input  wire [$clog2(NUM_SETS)-1:0]    iPfFillSetIdx,
+    input  wire [$clog2(ASSOC)-1:0]       iPfFillWay,
+    // BEGIN PATCH
+    // demand fill: update LRU when demand memory returns (matches C++ update_lru timing)
+    input  wire                           iDemandFill,
+    input  wire [$clog2(NUM_SETS)-1:0]    iDemandFillSetIdx,
+    input  wire [$clog2(ASSOC)-1:0]       iDemandFillWay
+    // END PATCH
 );
 
     // consts for bits
@@ -99,14 +113,27 @@ module REPLACE_POLICY #(
         if (!iRstN) begin
             for (z = 0; z < NUM_SETS; z = z + 1)
                 for (k = 0; k < ASSOC; k = k + 1)
-                    lruAge[z][k] <= k[WAY_BITS-1:0];
+                    lruAge[z][k] <= {WAY_BITS{1'b0}};
         end else if (iHit && iAccessValid) begin
             for (e = 0; e < ASSOC; e = e + 1) begin
                 if (e[WAY_BITS-1:0] == iHitWay)
                     lruAge[iSetIndex][e] <= {WAY_BITS{1'b0}};
-                else if (lruAge[iSetIndex][e] < lruAge[iSetIndex][iHitWay])
+                else if (lruAge[iSetIndex][e] <= lruAge[iSetIndex][iHitWay] && lruAge[iSetIndex][e] < {WAY_BITS{1'b1}})
                     lruAge[iSetIndex][e] <= lruAge[iSetIndex][e] + 1'b1;
             end
+        // BEGIN PATCH
+        end else if (iDemandFill) begin
+        // update LRU when demand fill completes — matches C++ update_lru(set, way) timing
+            for (e = 0; e < ASSOC; e = e + 1) begin
+                if (e[WAY_BITS-1:0] == iDemandFillWay)
+                    lruAge[iDemandFillSetIdx][e] <= {WAY_BITS{1'b0}};
+                else if (lruAge[iDemandFillSetIdx][e] <= lruAge[iDemandFillSetIdx][iDemandFillWay] && lruAge[iDemandFillSetIdx][e] < {WAY_BITS{1'b1}})
+                    lruAge[iDemandFillSetIdx][e] <= lruAge[iDemandFillSetIdx][e] + 1'b1;
+            end
+        // END PATCH
+        end else if (iPfFill) begin
+            // mirror C++ update_mru: mark prefetched way as LRU so it's evicted before demand fills
+            lruAge[iPfFillSetIdx][iPfFillWay] <= {WAY_BITS{1'b1}};
         end
     end
 
@@ -203,6 +230,45 @@ module REPLACE_POLICY #(
     end
 
     assign oVictimWay = oVictimWayTemp;
+
+    // !!! prefetch victim query — combinational, uses iPfSetIndex/iPfValidBits
+    integer ip, yp;
+
+    reg [WAY_BITS-1:0] pfInvalidWayIndex;
+    reg                pfIsInvalid;
+    always @(*) begin
+        pfIsInvalid      = 1'b0;
+        pfInvalidWayIndex = {WAY_BITS{1'b0}};
+        for (ip = 0; ip < ASSOC; ip = ip + 1) begin
+            if (!iPfValidBits[ip] && !pfIsInvalid) begin
+                pfIsInvalid       = 1'b1;
+                pfInvalidWayIndex = ip[WAY_BITS-1:0];
+            end
+        end
+    end
+
+    reg [WAY_BITS-1:0] pfVictimNway;
+    always @(*) begin : selectpflru
+        reg [WAY_BITS-1:0] mx;
+        mx         = {WAY_BITS{1'b0}};
+        pfVictimNway = {WAY_BITS{1'b0}};
+        for (yp = 0; yp < ASSOC; yp = yp + 1) begin
+            if (iPfValidBits[yp]) begin
+                if (lruAge[iPfSetIndex][yp] > mx) begin
+                    mx           = lruAge[iPfSetIndex][yp];
+                    pfVictimNway = yp[WAY_BITS-1:0];
+                end
+            end
+        end
+    end
+
+    reg [WAY_BITS-1:0] oPfVictimWayTemp;
+    always @(*) begin
+        oPfVictimWayTemp = pfVictimNway;
+        if (pfIsInvalid)
+            oPfVictimWayTemp = pfInvalidWayIndex;
+    end
+    assign oPfVictimWay = oPfVictimWayTemp;
 
     // !!! prefetch — fire on miss
     wire [31:0] base = iAddress & ~(32'd0 + BLOCK_SIZE - 1);

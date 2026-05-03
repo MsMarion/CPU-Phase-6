@@ -48,6 +48,7 @@ module CACHE #(
     localparam PREFETCH_WAIT= 3'd4; // wait for prefetch i_mem_valid
     localparam REFILL_DONE  = 3'd5;
     localparam PREFETCH_REQ = 3'd6;
+    localparam PF_WB_READY  = 3'd7; // hold prefetch dirty writeback for one cycle
 
     reg [2:0] state, next_state;
 
@@ -77,9 +78,22 @@ module CACHE #(
 
     wire        prefetch_req;
     wire [31:0] prefetch_addr;
+    wire [IDX_BITS-1:0] pf_idx_wire = prefetch_addr[IDX_BITS+OFF_BITS-1 : OFF_BITS];
+    wire [TAG_BITS-1:0] pf_tag_wire = prefetch_addr[31 : IDX_BITS+OFF_BITS];
+
+    reg [NUM_WAYS-1:0] packed_pf_valid;
+    integer pv;
+    always @(*) begin
+        for (pv = 0; pv < NUM_WAYS; pv = pv + 1)
+            packed_pf_valid[pv] = validBits[pf_idx_wire][pv];
+    end
+
     wire miss_pulse = (state == IDLE) && (i_read || i_write) && !hit;
 
+    wire victim_dirty_now = validBits[current_idx][victim_way] && dirtyBits[current_idx][victim_way];
+
     wire [$clog2(NUM_WAYS)-1:0] victim_way;
+    wire [$clog2(NUM_WAYS)-1:0] pf_victim_way_wire;
     REPLACE_POLICY #(
         .ASSOC(NUM_WAYS),
         .NUM_SETS(NUM_SETS),
@@ -97,7 +111,18 @@ module CACHE #(
         .iAddress(i_addr),
         .iMiss(miss_pulse),
         .oPrefetchReq(prefetch_req),
-        .oPrefetchAddr(prefetch_addr)
+        .oPrefetchAddr(prefetch_addr),
+        .iPfSetIndex  (pf_idx_wire),
+        .iPfValidBits (packed_pf_valid),
+        .oPfVictimWay (pf_victim_way_wire),
+        .iPfFill      ((state == PREFETCH_WAIT) && i_mem_valid),
+        .iPfFillSetIdx(pf_idx_latched),
+        .iPfFillWay   (pf_victim_way_reg),
+        // BEGIN PATCH
+        .iDemandFill    ((state == MISS_VALID) && i_mem_valid),
+        .iDemandFillSetIdx(miss_idx),
+        .iDemandFillWay (miss_victim_way)
+        // END PATCH
     );
 
     // Registers to hold miss address info
@@ -105,28 +130,42 @@ module CACHE #(
     reg [IDX_BITS-1:0]        miss_idx;
     reg [OFF_BITS-1:0]        miss_offset;
     reg [$clog2(NUM_WAYS)-1:0] miss_victim_way;
+    reg [TAG_BITS-1:0]        victim_tag_latched;
+    reg [(BLOCK_SIZE*8)-1:0]  victim_data_latched;
 
     reg        miss_was_write;
     reg        miss_was_read;
     reg [1:0]  miss_funct;
     reg [31:0] miss_cpu_data;
-    reg [1:0]  mem_valid_count;
 
     // Prefetch latch
     reg        prefetch_pending;
     reg [31:0] prefetch_addr_reg;
 
+    // Prefetch victim state
+    reg [$clog2(NUM_WAYS)-1:0] pf_victim_way_reg;
+    reg                        pf_victim_dirty_reg;
+    reg [TAG_BITS-1:0]         pf_victim_tag_reg;
+    reg [(BLOCK_SIZE*8)-1:0]   pf_victim_data_reg;
+    reg [TAG_BITS-1:0]         pf_tag_latched;
+    reg [IDX_BITS-1:0]         pf_idx_latched;
+    
     always @(posedge i_clk or negedge i_rstn) begin
         if (!i_rstn) begin
             state <= IDLE;
-            mem_valid_count  <= 2'd0;
-            prefetch_pending <= 1'b0;
-            prefetch_addr_reg<= 32'b0;
+            prefetch_pending    <= 1'b0;
+            prefetch_addr_reg   <= 32'b0;
+            pf_victim_way_reg   <= {$clog2(NUM_WAYS){1'b0}};
+            pf_victim_dirty_reg <= 1'b0;
+            pf_victim_tag_reg   <= {TAG_BITS{1'b0}};
+            pf_victim_data_reg  <= {(BLOCK_SIZE*8){1'b0}};
+            pf_tag_latched      <= {TAG_BITS{1'b0}};
+            pf_idx_latched      <= {IDX_BITS{1'b0}};
             for (integer i = 0; i < NUM_SETS; i++) begin
                 for (integer j = 0; j < NUM_WAYS; j++) begin
                     validBits[i][j] <= 1'b0;
                     dirtyBits[i][j] <= 1'b0;
-                    tagArray[i][j] <= {(TAG_BITS){1'b0}};
+                    tagArray[i][j]  <= {(TAG_BITS){1'b0}};
                     dataArray[i][j] <= {(BLOCK_SIZE*8){1'b0}};
                 end
             end
@@ -135,7 +174,6 @@ module CACHE #(
 
             case (state)
                 IDLE: begin
-                    mem_valid_count <= 2'd0;
                     if (i_read || i_write) begin
                         if (hit) begin
                             if (i_write) begin
@@ -149,18 +187,22 @@ module CACHE #(
                             end
                         end else begin
                             // latch miss context
-                            miss_tag        <= current_tag;
-                            miss_idx        <= current_idx;
-                            miss_offset     <= current_off;
-                            miss_victim_way <= victim_way;
-                            miss_was_write  <= i_write;
-                            miss_was_read   <= i_read;
-                            miss_funct      <= i_funct;
-                            miss_cpu_data   <= i_cpu_data;
+                            miss_tag           <= current_tag;
+                            miss_idx           <= current_idx;
+                            miss_offset        <= current_off;
+                            miss_victim_way    <= victim_way;
+                            victim_tag_latched <= tagArray[current_idx][victim_way];
+                            victim_data_latched <= dataArray[current_idx][victim_way];
+                            miss_was_write     <= i_write;
+                            miss_was_read      <= i_read;
+                            miss_funct         <= i_funct;
+                            miss_cpu_data      <= i_cpu_data;
 
                             if (prefetch_req) begin
-                                prefetch_pending  <= 1'b1;
-                                prefetch_addr_reg <= prefetch_addr;
+                                prefetch_pending    <= 1'b1;
+                                prefetch_addr_reg   <= prefetch_addr;
+                                pf_idx_latched      <= pf_idx_wire;
+                                pf_tag_latched      <= pf_tag_wire;
                             end else begin
                                 prefetch_pending  <= 1'b0;
                                 prefetch_addr_reg <= 32'b0;
@@ -180,15 +222,30 @@ module CACHE #(
                     end
                 end
 
-                // Prefetch return (no fill, just consume)
+                // Prefetch return — fill block into cache
                 PREFETCH_WAIT: begin
                     if (i_mem_valid) begin
+                        dataArray [pf_idx_latched][pf_victim_way_reg] <= i_mem_rd_data;
+                        tagArray  [pf_idx_latched][pf_victim_way_reg] <= pf_tag_latched;
+                        validBits [pf_idx_latched][pf_victim_way_reg] <= 1'b1;
+                        dirtyBits [pf_idx_latched][pf_victim_way_reg] <= 1'b0;
                         prefetch_pending <= 1'b0;
                     end
                 end
 
+                // Dirty victim writeback in progress
+                WB_READY: begin
+                    // Mark as not dirty while being written back
+                    dirtyBits[miss_idx][miss_victim_way] <= 1'b0;
+                end
+
+                // Clean victim eviction (no WB) or after dirty WB
+                MISS_REQ: begin
+                    // Always invalidate the victim way
+                    validBits[miss_idx][miss_victim_way] <= 1'b0;
+                end
+
                 REFILL_DONE: begin
-                    mem_valid_count <= 2'd0;
                     if (miss_was_write) begin
                         case (miss_funct)
                             2'b00: dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 8]  <= miss_cpu_data[7:0];
@@ -198,6 +255,15 @@ module CACHE #(
                         endcase
                         dirtyBits[miss_idx][miss_victim_way] <= 1'b1;
                     end
+                end
+
+                PREFETCH_REQ: begin
+                    // Capture prefetch victim after demand fill's LRU update has been applied
+                    pf_victim_way_reg   <= pf_victim_way_wire;
+                    pf_victim_dirty_reg <= validBits[pf_idx_latched][pf_victim_way_wire]
+                                          && dirtyBits[pf_idx_latched][pf_victim_way_wire];
+                    pf_victim_tag_reg   <= tagArray  [pf_idx_latched][pf_victim_way_wire];
+                    pf_victim_data_reg  <= dataArray [pf_idx_latched][pf_victim_way_wire];
                 end
 
                 default: ; // no-op
@@ -221,10 +287,10 @@ module CACHE #(
                     if (hit) begin
                         o_hit = 1'b1;
                     end else begin
-                        if (dirtyBits[current_idx][victim_way] && validBits[current_idx][victim_way]) begin
+                        o_miss = 1'b1;
+                        if (victim_dirty_now) begin
                             next_state = WB_READY;
                         end else begin
-                            o_miss     = 1'b1;
                             next_state = MISS_REQ;
                         end
                     end
@@ -232,9 +298,10 @@ module CACHE #(
             end
 
             WB_READY: begin
+                o_miss        = 1'b1;
                 o_mem_wr      = 1'b1;
-                o_mem_wr_addr = {tagArray[miss_idx][miss_victim_way], miss_idx, {OFF_BITS{1'b0}}};
-                o_mem_wr_data = dataArray[miss_idx][miss_victim_way];
+                o_mem_wr_addr = {victim_tag_latched, miss_idx, {OFF_BITS{1'b0}}};
+                o_mem_wr_data = victim_data_latched;
                 next_state    = MISS_REQ;
             end
 
@@ -268,12 +335,25 @@ module CACHE #(
                 next_state    = PREFETCH_WAIT;
             end
 
-            // Wait for prefetch data (no fill)
+            // Wait for prefetch data
             PREFETCH_WAIT: begin
-                o_miss = 1'b1;  // keep stall until prefetch data arrives
+                o_miss = 1'b1;
                 if (i_mem_valid) begin
-                    next_state = REFILL_DONE;
+                    if (pf_victim_dirty_reg) begin
+                        next_state = PF_WB_READY;
+                    end else begin
+                        next_state = REFILL_DONE;
+                    end
                 end
+            end
+
+            // Hold prefetch dirty writeback for one full cycle (mirrors WB_READY)
+            PF_WB_READY: begin
+                o_miss        = 1'b1;
+                o_mem_wr      = 1'b1;
+                o_mem_wr_addr = {pf_victim_tag_reg, pf_idx_latched, {OFF_BITS{1'b0}}};
+                o_mem_wr_data = pf_victim_data_reg;
+                next_state    = REFILL_DONE;
             end
 
             REFILL_DONE: begin
@@ -293,20 +373,16 @@ module CACHE #(
         if (state == REFILL_DONE && miss_was_read) begin
             // Data just filled — serve read from the saved miss context
             case (miss_funct)
-                2'b00: o_cpu_data = {{24{dataArray[miss_idx][miss_victim_way][miss_offset*8+7]}},
-                                         dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 8]};
-                2'b01: o_cpu_data = {{16{dataArray[miss_idx][miss_victim_way][miss_offset*8+15]}},
-                                         dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 16]};
+                2'b00: o_cpu_data = {24'b0, dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 8]};
+                2'b01: o_cpu_data = {16'b0, dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 16]};
                 2'b10: o_cpu_data = dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 32];
                 default: o_cpu_data = 32'b0;
             endcase
         end else if (hit && state == IDLE) begin
             // Normal hit path - output data for both reads and writes (old value on write)
             case (i_funct)
-                2'b00: o_cpu_data = {{24{dataArray[current_idx][hit_way][current_off*8+7]}},
-                                         dataArray[current_idx][hit_way][current_off*8 +: 8]};
-                2'b01: o_cpu_data = {{16{dataArray[current_idx][hit_way][current_off*8+15]}},
-                                         dataArray[current_idx][hit_way][current_off*8 +: 16]};
+                2'b00: o_cpu_data = {24'b0, dataArray[current_idx][hit_way][current_off*8 +: 8]};
+                2'b01: o_cpu_data = {16'b0, dataArray[current_idx][hit_way][current_off*8 +: 16]};
                 2'b10: o_cpu_data = dataArray[current_idx][hit_way][current_off*8 +: 32];
                 default: o_cpu_data = 32'b0;
             endcase
