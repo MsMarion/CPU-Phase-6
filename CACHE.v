@@ -41,12 +41,13 @@ module CACHE #(
     reg                       dirtyBits  [NUM_SETS-1:0][NUM_WAYS-1:0];
     reg [BLOCK_SIZE*8-1:0]    dataArray  [NUM_SETS-1:0][NUM_WAYS-1:0];
 
-    localparam IDLE        = 3'd0;
-    localparam MISS_REQ    = 3'd1; // issue read request (o_miss + o_mem_rd)
-    localparam MISS_VALID  = 3'd2; // wait for i_mem_valid
-    localparam WB_READY    = 3'd3; // writeback dirty line
-    localparam WB_VALID    = 3'd4; // (unused, can be kept or removed)
-    localparam REFILL_DONE = 3'd5;
+    localparam IDLE         = 3'd0;
+    localparam MISS_REQ     = 3'd1; // issue read request (o_miss + o_mem_rd)
+    localparam MISS_VALID   = 3'd2; // wait for demand i_mem_valid
+    localparam WB_READY     = 3'd3; // writeback dirty line
+    localparam PREFETCH_WAIT= 3'd4; // wait for prefetch i_mem_valid
+    localparam REFILL_DONE  = 3'd5;
+    localparam PREFETCH_REQ = 3'd6;
 
     reg [2:0] state, next_state;
 
@@ -94,7 +95,7 @@ module CACHE #(
         .iValidBits(packed_valid),
         .oVictimWay(victim_way),
         .iAddress(i_addr),
-        .iMiss(miss_pulse),       // FIX (Bug 5): was o_miss (multi-cycle)
+        .iMiss(miss_pulse),
         .oPrefetchReq(prefetch_req),
         .oPrefetchAddr(prefetch_addr)
     );
@@ -109,10 +110,18 @@ module CACHE #(
     reg        miss_was_read;
     reg [1:0]  miss_funct;
     reg [31:0] miss_cpu_data;
+    reg [1:0]  mem_valid_count;
+
+    // Prefetch latch
+    reg        prefetch_pending;
+    reg [31:0] prefetch_addr_reg;
 
     always @(posedge i_clk or negedge i_rstn) begin
         if (!i_rstn) begin
             state <= IDLE;
+            mem_valid_count  <= 2'd0;
+            prefetch_pending <= 1'b0;
+            prefetch_addr_reg<= 32'b0;
             for (integer i = 0; i < NUM_SETS; i++) begin
                 for (integer j = 0; j < NUM_WAYS; j++) begin
                     validBits[i][j] <= 1'b0;
@@ -126,6 +135,7 @@ module CACHE #(
 
             case (state)
                 IDLE: begin
+                    mem_valid_count <= 2'd0;
                     if (i_read || i_write) begin
                         if (hit) begin
                             if (i_write) begin
@@ -133,12 +143,12 @@ module CACHE #(
                                     2'b00: dataArray[current_idx][hit_way][current_off*8 +: 8]  <= i_cpu_data[7:0];
                                     2'b01: dataArray[current_idx][hit_way][current_off*8 +: 16] <= i_cpu_data[15:0];
                                     2'b10: dataArray[current_idx][hit_way][current_off*8 +: 32] <= i_cpu_data;
-                                    default: ; // no-op
+                                    default: ;
                                 endcase
                                 dirtyBits[current_idx][hit_way] <= 1'b1;
                             end
                         end else begin
-                            // Save all miss context so states after IDLE are self-contained
+                            // latch miss context
                             miss_tag        <= current_tag;
                             miss_idx        <= current_idx;
                             miss_offset     <= current_off;
@@ -147,13 +157,22 @@ module CACHE #(
                             miss_was_read   <= i_read;
                             miss_funct      <= i_funct;
                             miss_cpu_data   <= i_cpu_data;
+
+                            if (prefetch_req) begin
+                                prefetch_pending  <= 1'b1;
+                                prefetch_addr_reg <= prefetch_addr;
+                            end else begin
+                                prefetch_pending  <= 1'b0;
+                                prefetch_addr_reg <= 32'b0;
+                            end
                         end
                     end
                 end
 
+                // Demand return
                 MISS_VALID: begin
                     if (i_mem_valid) begin
-                        // Fill the line from memory
+                        // Fill demand block
                         dataArray[miss_idx][miss_victim_way] <= i_mem_rd_data;
                         tagArray[miss_idx][miss_victim_way]  <= miss_tag;
                         validBits[miss_idx][miss_victim_way] <= 1'b1;
@@ -161,8 +180,15 @@ module CACHE #(
                     end
                 end
 
+                // Prefetch return (no fill, just consume)
+                PREFETCH_WAIT: begin
+                    if (i_mem_valid) begin
+                        prefetch_pending <= 1'b0;
+                    end
+                end
+
                 REFILL_DONE: begin
-                    // Apply deferred write if this was a write miss
+                    mem_valid_count <= 2'd0;
                     if (miss_was_write) begin
                         case (miss_funct)
                             2'b00: dataArray[miss_idx][miss_victim_way][miss_offset*8 +: 8]  <= miss_cpu_data[7:0];
@@ -171,12 +197,6 @@ module CACHE #(
                             default: ;
                         endcase
                         dirtyBits[miss_idx][miss_victim_way] <= 1'b1;
-                    end
-                end
-
-                WB_VALID: begin
-                    if (i_mem_valid) begin
-                        // Writeback complete - miss fetch starts next
                     end
                 end
 
@@ -201,53 +221,67 @@ module CACHE #(
                     if (hit) begin
                         o_hit = 1'b1;
                     end else begin
-                        // miss: decide if we must write back first
                         if (dirtyBits[current_idx][victim_way] && validBits[current_idx][victim_way]) begin
-                            // dirty victim: write back first
                             next_state = WB_READY;
                         end else begin
-                            // clean victim: defer issuing the read until MISS_REQ
-                            // (the harness will already be stalled by then)
-                            o_miss     = 1'b1;   // optional: one-cycle pulse
+                            o_miss     = 1'b1;
                             next_state = MISS_REQ;
                         end
                     end
                 end
             end
 
-
             WB_READY: begin
-                // write back dirty victim line (no stall protocol in harness)
                 o_mem_wr      = 1'b1;
                 o_mem_wr_addr = {tagArray[miss_idx][miss_victim_way], miss_idx, {OFF_BITS{1'b0}}};
                 o_mem_wr_data = dataArray[miss_idx][miss_victim_way];
-                // next cycle: issue the read miss request
                 next_state    = MISS_REQ;
             end
 
+            // First miss transaction: demand
             MISS_REQ: begin
-                // now issue the read request and start the stall in the harness
                 o_miss        = 1'b1;
                 o_mem_rd      = 1'b1;
                 o_mem_rd_addr = {miss_tag, miss_idx, {OFF_BITS{1'b0}}};
                 next_state    = MISS_VALID;
             end
 
-            WB_VALID: begin
-                // no protocol for writeback completion in harness; you can leave this unused
-                next_state = WB_VALID;
+            // Wait for demand data
+            MISS_VALID: begin
+                o_miss = 1'b1;  // keep stall active for this access
+                if (i_mem_valid) begin
+                    if (prefetch_pending) begin
+                        // Demand done, now start prefetch as a second miss
+                        next_state = PREFETCH_REQ;
+                    end else begin
+                        // No prefetch: go straight to refill completion
+                        next_state = REFILL_DONE;
+                    end
+                end
             end
 
-            MISS_VALID: begin
-                if (i_mem_valid) next_state = REFILL_DONE;
+            // Second miss transaction: prefetch
+            PREFETCH_REQ: begin
+                o_miss        = 1'b1;          // still same access, still stalled
+                o_mem_rd      = 1'b1;
+                o_mem_rd_addr = prefetch_addr_reg;
+                next_state    = PREFETCH_WAIT;
+            end
+
+            // Wait for prefetch data (no fill)
+            PREFETCH_WAIT: begin
+                o_miss = 1'b1;  // keep stall until prefetch data arrives
+                if (i_mem_valid) begin
+                    next_state = REFILL_DONE;
+                end
             end
 
             REFILL_DONE: begin
-                o_hit = miss_was_read ? 1'b1 : 1'b0;  // Only assert hit for read misses
+                o_hit      = miss_was_read ? 1'b1 : 1'b0;
                 next_state = IDLE;
             end
 
-            default: ; // no-op
+            default: ;
         endcase
     end
 
