@@ -1,61 +1,44 @@
-/*
-    notes
-    i-cache, stores recently fetched instructions so if stage can grab next in cycle
-    d-cache, mem stage reads/writes data, holds recently accessed data words 
-    on miss, the pipeline is stalled 
-    takes 100 cycles in miss
-    heap is 0x10040000 – 0xFFFEFFFF
-    i-cache 0x00400000 – 0x0FFFFFFF
-    d-cache 0x10010000 – 0x1003FFFF
-    no need for cache coherence, cache coherence is where multiple caches hold copies of same memory location
-    two caches access diff address ranges and diff things, no conflict
-
-    plru is the tree system, 0 left, 1 right
-    lru is the linkedin list system, EXPENSIVE
-    one policy is picked between the two, should be a flag, lets do both to get 3 points hell yes 
-
-    victim is the cache block that wasn't accessed recently and needs to be kicked out due to lru/plru, when miss happens and the set is full, this is it lol
-    dirty, means block was written to and hasn't been saved to main memory (main memory is out of date), dirty bit is flagged as 1
-    if dirty block is victim, we need to write it back first and then delete yk
-
-    my module is to do plru lru and outputting ovctimway to know who to victimize
-    i can also evict invalid one over a live one (best victim lol)
-    when access happens, output oprefetchreq and the addy hey go to this one dude
-    
-    */
-
 module REPLACE_POLICY #(
-    parameter ASSOC      = 2, // 1=direct, 2=2-way, numsets is fully associative
+    parameter ASSOC      = 2, // 1=direct map, 2=2-way, higher=n-way
     parameter NUM_SETS   = 32,
     parameter BLOCK_SIZE = 16,
-    parameter IS_LRU = 1 // flag for using plru/lru; LRU=1, PLRU=0
+    parameter IS_LRU = 1 // 1=LRU, 0=PLRU
 ) (
     input  wire        iClk,
     input  wire        iRstN,
     // access info from cache
     input  wire [$clog2(NUM_SETS)-1:0] iSetIndex,
-    input  wire        iAccessValid,   // a real access happened
+    input  wire        iAccessValid,
     input  wire        iHit,
     input  wire [$clog2(ASSOC)-1:0] iHitWay,
     input  wire [ASSOC-1:0] iValidBits,
     // victim selection output
     output wire [$clog2(ASSOC)-1:0] oVictimWay,
     // prefetch
-    input  wire [31:0] iAddress,       // current access address
-    input  wire        iMiss,          // current access is a miss
-    output wire        oPrefetchReq,   // request to prefetch next block
-    output wire [31:0] oPrefetchAddr   // address of next sequential block
+    input  wire [31:0] iAddress,
+    input  wire        iMiss,
+    output wire        oPrefetchReq,
+    output wire [31:0] oPrefetchAddr,
+    // prefetch victim query (combinational, separate from demand victim)
+    input  wire [$clog2(NUM_SETS)-1:0] iPfSetIndex,
+    input  wire [ASSOC-1:0]            iPfValidBits,
+    output wire [$clog2(ASSOC)-1:0]    oPfVictimWay,
+    // fill notifications: update replacement state when a block is loaded
+    input  wire                           iPfFill,
+    input  wire [$clog2(NUM_SETS)-1:0]    iPfFillSetIdx,
+    input  wire [$clog2(ASSOC)-1:0]       iPfFillWay,
+    input  wire                           iDemandFill,
+    input  wire [$clog2(NUM_SETS)-1:0]    iDemandFillSetIdx,
+    input  wire [$clog2(ASSOC)-1:0]       iDemandFillWay
 );
 
-    // consts for bits
     localparam WAY_BITS  = (ASSOC == 1) ? 1 : $clog2(ASSOC);
     localparam TREE_BITS = (ASSOC > 1) ? (ASSOC-1) : 1;
 
-    // !!! lru 2-way
+    // 2-way LRU/PLRU: one bit per set
     reg lruBit  [0:NUM_SETS-1];
     reg plruBit [0:NUM_SETS-1];
 
-    // zero-extend to WAY_BITS to avoid warnings
     wire [WAY_BITS-1:0] lruVictim2way  = {{(WAY_BITS-1){1'b0}}, ~lruBit[iSetIndex]};
     wire [WAY_BITS-1:0] plruVictim2way = {{(WAY_BITS-1){1'b0}},  plruBit[iSetIndex]};
 
@@ -72,21 +55,20 @@ module REPLACE_POLICY #(
         end
     end
 
-
-    // !!! lru n-way
-    reg [WAY_BITS-1:0] lruAge [0:NUM_SETS-1][0:ASSOC-1];
-    reg [WAY_BITS-1:0] lruVictimNway;
+    // N-way LRU: track age of each way (higher age = least recently used)
+    reg [WAY_BITS-1:0] age [0:NUM_SETS-1][0:ASSOC-1];
+    reg [WAY_BITS-1:0] lru_victim;
 
     integer y;
     always @(*) begin : selectlru
         reg [WAY_BITS-1:0] max;
         max = {WAY_BITS{1'b0}};
-        lruVictimNway = {WAY_BITS{1'b0}};
+        lru_victim = {WAY_BITS{1'b0}};
         for (y = 0; y < ASSOC; y = y + 1) begin
             if (iValidBits[y]) begin
-                if (lruAge[iSetIndex][y] > max) begin
-                    max = lruAge[iSetIndex][y];
-                    lruVictimNway = y[WAY_BITS-1:0];
+                if (age[iSetIndex][y] > max) begin
+                    max        = age[iSetIndex][y];
+                    lru_victim = y[WAY_BITS-1:0];
                 end
             end
         end
@@ -95,25 +77,35 @@ module REPLACE_POLICY #(
     integer z;
     integer k;
     integer e;
+
     always @(posedge iClk or negedge iRstN) begin
         if (!iRstN) begin
             for (z = 0; z < NUM_SETS; z = z + 1)
                 for (k = 0; k < ASSOC; k = k + 1)
-                    lruAge[z][k] <= k[WAY_BITS-1:0];
+                    age[z][k] <= {WAY_BITS{1'b0}};
         end else if (iHit && iAccessValid) begin
             for (e = 0; e < ASSOC; e = e + 1) begin
                 if (e[WAY_BITS-1:0] == iHitWay)
-                    lruAge[iSetIndex][e] <= {WAY_BITS{1'b0}};
-                else if (lruAge[iSetIndex][e] < lruAge[iSetIndex][iHitWay])
-                    lruAge[iSetIndex][e] <= lruAge[iSetIndex][e] + 1'b1;
+                    age[iSetIndex][e] <= {WAY_BITS{1'b0}};
+                else if (age[iSetIndex][e] <= age[iSetIndex][iHitWay] && age[iSetIndex][e] < {WAY_BITS{1'b1}})
+                    age[iSetIndex][e] <= age[iSetIndex][e] + 1'b1;
             end
+        end else if (iDemandFill) begin
+            for (e = 0; e < ASSOC; e = e + 1) begin
+                if (e[WAY_BITS-1:0] == iDemandFillWay)
+                    age[iDemandFillSetIdx][e] <= {WAY_BITS{1'b0}};
+                else if (age[iDemandFillSetIdx][e] <= age[iDemandFillSetIdx][iDemandFillWay] && age[iDemandFillSetIdx][e] < {WAY_BITS{1'b1}})
+                    age[iDemandFillSetIdx][e] <= age[iDemandFillSetIdx][e] + 1'b1;
+            end
+        end else if (iPfFill) begin
+            // mark prefetched way as oldest so demand fills evict it first
+            age[iPfFillSetIdx][iPfFillWay] <= {WAY_BITS{1'b1}};
         end
     end
 
-
-    // !!! plru n-way (tree)
+    // N-way PLRU: binary tree per set
     reg [TREE_BITS-1:0] plruTree     [0:NUM_SETS-1];
-    reg [WAY_BITS-1:0]  plruVictimNway;
+    reg [WAY_BITS-1:0]  plru_victim;
 
     always @(*) begin : selectplru
         reg [WAY_BITS-1:0] node;
@@ -132,14 +124,13 @@ module REPLACE_POLICY #(
                 node = 2*node + 1;
             end
         end
-        plruVictimNway = wayIndex;
+        plru_victim = wayIndex;
     end
 
-    // allow non-blocking assignments to array[variable_index] inside loops).
-    //we pre-compute which node each tree level touches combinatorially,
-    // then do a single non-blocking write per level using those fixed indices.
-    reg [WAY_BITS-1:0] plruNode [0:WAY_BITS-1]; // node index at each level
-    reg                plruDir  [0:WAY_BITS-1]; // direction bit to write at each level
+    // Pre-compute node/direction for each tree level so loop body uses fixed indices,
+    // allowing non-blocking assignments inside the sequential always block.
+    reg [WAY_BITS-1:0] plruNode [0:WAY_BITS-1];
+    reg                plruDir  [0:WAY_BITS-1];
 
     integer cp;
     always @(*) begin : plruPrecompute
@@ -148,10 +139,10 @@ module REPLACE_POLICY #(
         for (cp = 0; cp < WAY_BITS; cp = cp + 1) begin
             plruNode[cp] = n;
             if (iHitWay[WAY_BITS-1-cp]) begin
-                plruDir[cp] = 1'b0; // point away from right -> left
+                plruDir[cp] = 1'b0;
                 n = 2*n + 2;
             end else begin
-                plruDir[cp] = 1'b1; // point away from left -> right
+                plruDir[cp] = 1'b1;
                 n = 2*n + 1;
             end
         end
@@ -164,47 +155,80 @@ module REPLACE_POLICY #(
             for (gp = 0; gp < NUM_SETS; gp = gp + 1)
                 plruTree[gp] <= {TREE_BITS{1'b0}};
         end else if (iHit && iAccessValid) begin
-            // each level writes to a statically-known index within the set
-            // (plruNode[lp] is combinatorial, not a loop-carried variable here)
             for (lp = 0; lp < WAY_BITS; lp = lp + 1)
                 plruTree[iSetIndex][plruNode[lp]] <= plruDir[lp];
         end
     end
 
-
-    // !!! invalid way scan — prefer empty slot over evicting live line
-    reg [WAY_BITS-1:0] invalidWayIndex;
-    reg                isInvalid;
+    // Prefer filling an invalid (empty) way over evicting a live block
+    reg [WAY_BITS-1:0] empty_way;
+    reg                has_empty;
     integer i;
 
     always @(*) begin
-        isInvalid      = 1'b0;
-        invalidWayIndex = {WAY_BITS{1'b0}};
+        has_empty = 1'b0;
+        empty_way = {WAY_BITS{1'b0}};
         for (i = 0; i < ASSOC; i = i + 1) begin
-            if (!iValidBits[i] && !isInvalid) begin
-                isInvalid       = 1'b1;
-                invalidWayIndex = i[WAY_BITS-1:0];
+            if (!iValidBits[i] && !has_empty) begin
+                has_empty = 1'b1;
+                empty_way = i[WAY_BITS-1:0];
             end
         end
     end
 
-    // !!! victim selection
-    reg [WAY_BITS-1:0] oVictimWayTemp;
+    reg [WAY_BITS-1:0] victim_sel;
     always @(*) begin
         if (ASSOC == 1)
-            oVictimWayTemp = {WAY_BITS{1'b0}};
+            victim_sel = {WAY_BITS{1'b0}};
         else if (ASSOC == 2)
-            oVictimWayTemp = IS_LRU ? lruVictim2way : plruVictim2way;
+            victim_sel = IS_LRU ? lruVictim2way : plruVictim2way;
         else
-            oVictimWayTemp = IS_LRU ? lruVictimNway : plruVictimNway;
+            victim_sel = IS_LRU ? lru_victim : plru_victim;
 
-        if (isInvalid)
-            oVictimWayTemp = invalidWayIndex;
+        if (has_empty)
+            victim_sel = empty_way;
     end
 
-    assign oVictimWay = oVictimWayTemp;
+    assign oVictimWay = victim_sel;
 
-    // !!! prefetch — fire on miss
+    integer ip, yp;
+
+    reg [WAY_BITS-1:0] pf_empty_way;
+    reg                pf_has_empty;
+    always @(*) begin
+        pf_has_empty = 1'b0;
+        pf_empty_way = {WAY_BITS{1'b0}};
+        for (ip = 0; ip < ASSOC; ip = ip + 1) begin
+            if (!iPfValidBits[ip] && !pf_has_empty) begin
+                pf_has_empty = 1'b1;
+                pf_empty_way = ip[WAY_BITS-1:0];
+            end
+        end
+    end
+
+    reg [WAY_BITS-1:0] pf_lru_victim;
+    always @(*) begin : selectpflru
+        reg [WAY_BITS-1:0] mx;
+        mx           = {WAY_BITS{1'b0}};
+        pf_lru_victim = {WAY_BITS{1'b0}};
+        for (yp = 0; yp < ASSOC; yp = yp + 1) begin
+            if (iPfValidBits[yp]) begin
+                if (age[iPfSetIndex][yp] > mx) begin
+                    mx            = age[iPfSetIndex][yp];
+                    pf_lru_victim = yp[WAY_BITS-1:0];
+                end
+            end
+        end
+    end
+
+    reg [WAY_BITS-1:0] pf_victim_sel;
+    always @(*) begin
+        pf_victim_sel = pf_lru_victim;
+        if (pf_has_empty)
+            pf_victim_sel = pf_empty_way;
+    end
+    assign oPfVictimWay = pf_victim_sel;
+
     wire [31:0] base = iAddress & ~(32'd0 + BLOCK_SIZE - 1);
     wire [31:0] next = base + BLOCK_SIZE;
 

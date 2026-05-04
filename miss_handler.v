@@ -1,10 +1,3 @@
-/*
-    Updated miss_handler.v to act as a Bus Arbiter/Memory Controller.
-    - Interfaces with two caches using the Ready/Valid handshake.
-    - Prioritizes D-Cache over I-Cache.
-    - Connects to SHARED_MEM for actual data persistence and latency.
-*/
-
 module MISS_HANDLER #(
     parameter BLOCK_SIZE = 64
 ) (
@@ -19,8 +12,7 @@ module MISS_HANDLER #(
     input  wire iIMemWr,
     input  wire [31:0] iIMemRdAddr,
     input  wire [31:0] iIMemWrAddr,
-    input  wire [BLOCK_SIZE*8-1:0] iIMemRdData, // usually zero
-    input  wire [BLOCK_SIZE*8-1:0] iIMemWrData, // usually zero
+    input  wire [BLOCK_SIZE*8-1:0] iIMemWrData,
 
     // D-Cache interface
     output reg  oDMemReady,
@@ -30,7 +22,6 @@ module MISS_HANDLER #(
     input  wire iDMemWr,
     input  wire [31:0] iDMemRdAddr,
     input  wire [31:0] iDMemWrAddr,
-    input  wire [BLOCK_SIZE*8-1:0] iDMemRdData,
     input  wire [BLOCK_SIZE*8-1:0] iDMemWrData,
 
     // Pipeline control
@@ -45,12 +36,12 @@ module MISS_HANDLER #(
     reg [1:0] state, next_state;
 
     // Memory Interface
-    reg         memRead;
-    reg         memWrite;
-    reg [31:0]  memAddr;
-    reg [BLOCK_SIZE*8-1:0] memWriteData;
-    wire [BLOCK_SIZE*8-1:0] memReadData;
-    wire        memReady; // from shared_mem
+    reg         rd_req;
+    reg         wr_req;
+    reg [31:0]  req_addr;
+    reg [BLOCK_SIZE*8-1:0] wr_data;
+    wire [BLOCK_SIZE*8-1:0] rd_data;
+    wire        mem_done;
 
     SHARED_MEM #(
         .BLOCK_SIZE(BLOCK_SIZE),
@@ -58,16 +49,16 @@ module MISS_HANDLER #(
     ) main_mem (
         .iClk(iClk),
         .iRstN(iRstN),
-        .iRead(memRead),
-        .iWrite(memWrite),
-        .iAddr(memAddr),
-        .iWriteData(memWriteData),
-        .oReadData(memReadData),
-        .oReady(memReady)
+        .iRead(rd_req),
+        .iWrite(wr_req),
+        .iAddr(req_addr),
+        .iWriteData(wr_data),
+        .oReadData(rd_data),
+        .oReady(mem_done)
     );
 
-    assign oIMemData = memReadData;
-    assign oDMemData = memReadData;
+    assign oIMemData = rd_data;
+    assign oDMemData = rd_data;
     assign oStall    = (state != IDLE);
 
     always @(posedge iClk or negedge iRstN) begin
@@ -84,13 +75,14 @@ module MISS_HANDLER #(
         oIMemValid = 1'b0;
         oDMemReady = 1'b0;
         oDMemValid = 1'b0;
-        memRead    = 1'b0;
-        memWrite   = 1'b0;
-        memAddr    = 32'b0;
-        memWriteData = 0;
+        rd_req     = 1'b0;
+        wr_req     = 1'b0;
+        req_addr   = 32'b0;
+        wr_data    = 0;
 
         case (state)
             IDLE: begin
+                // D-Cache gets priority
                 if (iDMemRd || iDMemWr) begin
                     oDMemReady = 1'b1;
                     next_state = SERVING_D;
@@ -101,24 +93,26 @@ module MISS_HANDLER #(
             end
 
             SERVING_D: begin
-                memRead      = iDMemRd;
-                memWrite     = iDMemWr;
-                memAddr      = iDMemRd ? iDMemRdAddr : iDMemWrAddr;
-                memWriteData = iDMemWrData;
-                
-                if (memReady) begin
+                oDMemReady = 1'b1;
+                rd_req     = iDMemRd;
+                wr_req     = iDMemWr;
+                req_addr   = iDMemRd ? iDMemRdAddr : iDMemWrAddr;
+                wr_data    = iDMemWrData;
+
+                if (mem_done) begin
                     oDMemValid = 1'b1;
                     next_state = IDLE;
                 end
             end
 
             SERVING_I: begin
-                memRead      = iIMemRd;
-                memWrite     = iIMemWr;
-                memAddr      = iIMemRd ? iIMemRdAddr : iIMemWrAddr;
-                memWriteData = iIMemWrData;
+                oIMemReady = 1'b1;
+                rd_req     = iIMemRd;
+                wr_req     = iIMemWr;
+                req_addr   = iIMemRd ? iIMemRdAddr : iIMemWrAddr;
+                wr_data    = iIMemWrData;
 
-                if (memReady) begin
+                if (mem_done) begin
                     oIMemValid = 1'b1;
                     next_state = IDLE;
                 end

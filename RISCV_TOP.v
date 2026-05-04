@@ -31,14 +31,13 @@ module RISCV_TOP (
     .i_cpu_data(32'b0),
     .i_mem_ready(wIMemReady),
     .i_mem_valid(wIMemValid),
-    .i_mem_data(wIMemData),
+    .i_mem_rd_data(wIMemData),
     .o_hit(wICacheHit), .o_miss(wICacheMiss),
     .o_cpu_data(wICacheReadData),
     .o_mem_rd(wIMemRd),
     .o_mem_wr(wIMemWr),
     .o_mem_rd_addr(wIMemRdAddr),
     .o_mem_wr_addr(wIMemWrAddr),
-    .o_mem_rd_data(wIMemRdData),
     .o_mem_wr_data(wIMemWrData)
   );
 
@@ -372,14 +371,13 @@ module RISCV_TOP (
     .i_cpu_data(wActualMemWriteData),
     .i_mem_ready(wDMemReady),
     .i_mem_valid(wDMemValid),
-    .i_mem_data(wDMemData),
+    .i_mem_rd_data(wDMemData),
     .o_hit(wDCacheHit), .o_miss(wDCacheMiss),
     .o_cpu_data(wMEM_ReadData),
     .o_mem_rd(wDMemRd),
     .o_mem_wr(wDMemWr),
     .o_mem_rd_addr(wDMemRdAddr),
     .o_mem_wr_addr(wDMemWrAddr),
-    .o_mem_rd_data(wDMemRdData),
     .o_mem_wr_data(wDMemWrData)
   );
 
@@ -458,7 +456,6 @@ module RISCV_TOP (
     .iIMemWr(wIMemWr),
     .iIMemRdAddr(wIMemRdAddr),
     .iIMemWrAddr(wIMemWrAddr),
-    .iIMemRdData(wIMemRdData),
     .iIMemWrData(wIMemWrData),
     // D-Cache
     .oDMemReady(wDMemReady),
@@ -468,7 +465,6 @@ module RISCV_TOP (
     .iDMemWr(wDMemWr),
     .iDMemRdAddr(wDMemRdAddr),
     .iDMemWrAddr(wDMemWrAddr),
-    .iDMemRdData(wDMemRdData),
     .iDMemWrData(wDMemWrData),
     // Global Stall
     .oStall(wCacheStall)
