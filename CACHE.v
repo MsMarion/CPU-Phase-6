@@ -171,12 +171,16 @@ module CACHE #(
                     if (i_read || i_write) begin
                         if (hit) begin
                             if (i_write) begin
-                                case (i_funct)
-                                    2'b00: dataArray[req_idx][hit_w][req_off*8 +: 8]  <= i_cpu_data[7:0];
-                                    2'b01: dataArray[req_idx][hit_w][req_off*8 +: 16] <= i_cpu_data[15:0];
-                                    2'b10: dataArray[req_idx][hit_w][req_off*8 +: 32] <= i_cpu_data;
-                                    default: ;
-                                endcase
+                                integer b1;
+                                for (b1 = 0; b1 < 4; b1 = b1 + 1) begin
+                                    if ((i_funct == 2'b10) ||
+                                        (i_funct == 2'b01 && b1 < 2) ||
+                                        (i_funct == 2'b00 && b1 < 1)) begin
+                                        if ({26'd0, req_off} + b1 < BLOCK_SIZE) begin
+                                            dataArray[req_idx][hit_w][({26'd0, req_off}+b1)*8 +: 8] <= i_cpu_data[b1*8 +: 8];
+                                        end
+                                    end
+                                end
                                 dirty[req_idx][hit_w] <= 1'b1;
                             end
                         end else begin
@@ -233,24 +237,32 @@ module CACHE #(
 
                 REFILL_DONE: begin
                     if (miss_was_write) begin
-                        case (miss_funct)
-                            2'b00: dataArray[miss_idx][evict_way][miss_offset*8 +: 8]  <= miss_cpu_data[7:0];
-                            2'b01: dataArray[miss_idx][evict_way][miss_offset*8 +: 16] <= miss_cpu_data[15:0];
-                            2'b10: dataArray[miss_idx][evict_way][miss_offset*8 +: 32] <= miss_cpu_data;
-                            default: ;
-                        endcase
+                        integer b2;
+                        for (b2 = 0; b2 < 4; b2 = b2 + 1) begin
+                            if ((miss_funct == 2'b10) ||
+                                (miss_funct == 2'b01 && b2 < 2) ||
+                                (miss_funct == 2'b00 && b2 < 1)) begin
+                                if ({26'd0, miss_offset} + b2 < BLOCK_SIZE) begin
+                                    dataArray[miss_idx][evict_way][({26'd0, miss_offset}+b2)*8 +: 8] <= miss_cpu_data[b2*8 +: 8];
+                                end
+                            end
+                        end
                         dirty[miss_idx][evict_way] <= 1'b1;
                     end
 
                     // CPU presents next access while o_miss=0; handle hit here
                     if ((i_read || i_write) && hit) begin
                         if (i_write) begin
-                            case (i_funct)
-                                2'b00: dataArray[req_idx][hit_w][req_off*8 +: 8]  <= i_cpu_data[7:0];
-                                2'b01: dataArray[req_idx][hit_w][req_off*8 +: 16] <= i_cpu_data[15:0];
-                                2'b10: dataArray[req_idx][hit_w][req_off*8 +: 32] <= i_cpu_data;
-                                default: ;
-                            endcase
+                            integer b3;
+                            for (b3 = 0; b3 < 4; b3 = b3 + 1) begin
+                                if ((i_funct == 2'b10) ||
+                                    (i_funct == 2'b01 && b3 < 2) ||
+                                    (i_funct == 2'b00 && b3 < 1)) begin
+                                    if ({26'd0, req_off} + b3 < BLOCK_SIZE) begin
+                                        dataArray[req_idx][hit_w][({26'd0, req_off}+b3)*8 +: 8] <= i_cpu_data[b3*8 +: 8];
+                                    end
+                                end
+                            end
                             dirty[req_idx][hit_w] <= 1'b1;
                         end
                     end
