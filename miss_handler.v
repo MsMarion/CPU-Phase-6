@@ -61,11 +61,15 @@ module MISS_HANDLER #(
     assign oDMemData = rd_data;
     assign oStall    = (state != IDLE);
 
+    integer dbg_txn;
     always @(posedge iClk or negedge iRstN) begin
         if (!iRstN) begin
-            state <= IDLE;
+            state   <= IDLE;
+            dbg_txn <= 0;
         end else begin
             state <= next_state;
+            if ((state == SERVING_D || state == SERVING_I) && mem_done)
+                dbg_txn <= dbg_txn + 1;
         end
     end
 
@@ -84,9 +88,15 @@ module MISS_HANDLER #(
             IDLE: begin
                 // D-Cache gets priority
                 if (iDMemRd || iDMemWr) begin
+                    if (dbg_txn <= 40) $display("[MEM] D-cache %s request addr=%08h",
+                        iDMemRd ? "READ" : "WRITE",
+                        iDMemRd ? iDMemRdAddr : iDMemWrAddr);
                     oDMemReady = 1'b1;
                     next_state = SERVING_D;
                 end else if (iIMemRd || iIMemWr) begin
+                    if (dbg_txn <= 40) $display("[MEM] I-cache %s request addr=%08h",
+                        iIMemRd ? "READ" : "WRITE",
+                        iIMemRd ? iIMemRdAddr : iIMemWrAddr);
                     oIMemReady = 1'b1;
                     next_state = SERVING_I;
                 end
@@ -100,6 +110,9 @@ module MISS_HANDLER #(
                 wr_data    = iDMemWrData;
 
                 if (mem_done) begin
+                    if (dbg_txn <= 40) $display("[MEM] D-cache %s done addr=%08h",
+                        iDMemRd ? "READ" : "WRITE",
+                        iDMemRd ? iDMemRdAddr : iDMemWrAddr);
                     oDMemValid = 1'b1;
                     next_state = IDLE;
                 end
@@ -113,6 +126,9 @@ module MISS_HANDLER #(
                 wr_data    = iIMemWrData;
 
                 if (mem_done) begin
+                    if (dbg_txn <= 40) $display("[MEM] I-cache %s done addr=%08h",
+                        iIMemRd ? "READ" : "WRITE",
+                        iIMemRd ? iIMemRdAddr : iIMemWrAddr);
                     oIMemValid = 1'b1;
                     next_state = IDLE;
                 end

@@ -78,11 +78,34 @@ module REPLACE_POLICY #(
     integer k;
     integer e;
 
+    // Delayed-print registers: capture update metadata at posedge, print one cycle later
+    reg                        dbg_lru_print;
+    reg [$clog2(NUM_SETS)-1:0] dbg_lru_set;
+    reg [1:0]                  dbg_lru_kind; // 0=hit, 1=demand_fill, 2=pf_fill
+    reg [WAY_BITS-1:0]         dbg_lru_way;
+    integer                    dbg_acc; // mirrors CACHE dbg_access for print gating
+
+    task dbg_lru_ages;
+        input [$clog2(NUM_SETS)-1:0] set_i;
+        integer wi;
+        begin
+            $write("  lru_ages set[%0d]:", set_i);
+            for (wi = 0; wi < ASSOC; wi = wi + 1)
+                $write(" way%0d=%0d", wi, age[set_i][wi]);
+            $write("\n");
+        end
+    endtask
+
     always @(posedge iClk or negedge iRstN) begin
         if (!iRstN) begin
             for (z = 0; z < NUM_SETS; z = z + 1)
                 for (k = 0; k < ASSOC; k = k + 1)
                     age[z][k] <= {WAY_BITS{1'b0}};
+            dbg_lru_print <= 1'b0;
+            dbg_lru_set   <= {$clog2(NUM_SETS){1'b0}};
+            dbg_lru_kind  <= 2'd0;
+            dbg_lru_way   <= {WAY_BITS{1'b0}};
+            dbg_acc       <= 0;
         end else if (iHit && iAccessValid) begin
             for (e = 0; e < ASSOC; e = e + 1) begin
                 if (e[WAY_BITS-1:0] == iHitWay)
@@ -90,6 +113,11 @@ module REPLACE_POLICY #(
                 else if (age[iSetIndex][e] <= age[iSetIndex][iHitWay] && age[iSetIndex][e] < {WAY_BITS{1'b1}})
                     age[iSetIndex][e] <= age[iSetIndex][e] + 1'b1;
             end
+            dbg_lru_print <= 1'b1;
+            dbg_lru_set   <= iSetIndex;
+            dbg_lru_kind  <= 2'd0;
+            dbg_lru_way   <= iHitWay[WAY_BITS-1:0];
+            dbg_acc       <= dbg_acc + 1;
         end else if (iDemandFill) begin
             for (e = 0; e < ASSOC; e = e + 1) begin
                 if (e[WAY_BITS-1:0] == iDemandFillWay)
@@ -97,9 +125,33 @@ module REPLACE_POLICY #(
                 else if (age[iDemandFillSetIdx][e] <= age[iDemandFillSetIdx][iDemandFillWay] && age[iDemandFillSetIdx][e] < {WAY_BITS{1'b1}})
                     age[iDemandFillSetIdx][e] <= age[iDemandFillSetIdx][e] + 1'b1;
             end
+            dbg_lru_print <= 1'b1;
+            dbg_lru_set   <= iDemandFillSetIdx;
+            dbg_lru_kind  <= 2'd1;
+            dbg_lru_way   <= iDemandFillWay;
+            dbg_acc       <= dbg_acc + 1;
         end else if (iPfFill) begin
             // mark prefetched way as oldest so demand fills evict it first
             age[iPfFillSetIdx][iPfFillWay] <= {WAY_BITS{1'b1}};
+            dbg_lru_print <= 1'b1;
+            dbg_lru_set   <= iPfFillSetIdx;
+            dbg_lru_kind  <= 2'd2;
+            dbg_lru_way   <= iPfFillWay;
+        end else begin
+            dbg_lru_print <= 1'b0;
+        end
+    end
+
+    // Delayed print: fires one cycle after the age[] update so values are visible
+    always @(posedge iClk) begin
+        if (dbg_lru_print && dbg_acc <= 41) begin
+            case (dbg_lru_kind)
+                2'd0: $display("  [LRU] hit  set=%0d way=%0d -> age reset", dbg_lru_set, dbg_lru_way);
+                2'd1: $display("  [LRU] fill set=%0d way=%0d -> age reset", dbg_lru_set, dbg_lru_way);
+                2'd2: $display("  [LRU] pf_fill set=%0d way=%0d -> age set MAX", dbg_lru_set, dbg_lru_way);
+                default: ;
+            endcase
+            dbg_lru_ages(dbg_lru_set);
         end
     end
 
